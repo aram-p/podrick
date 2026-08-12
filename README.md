@@ -27,7 +27,7 @@ $ pd log a7f
 
 ## Install
 
-Nothing is released yet, so the way in is from source. Needs Rust 1.82 or newer
+Nothing is released yet, so the way in is from source. Needs Rust 1.85 or newer
 ([rustup](https://rustup.rs)):
 
 ```sh
@@ -71,7 +71,7 @@ project has its own list. `-g` uses a global one. `pd all` shows every list at o
 | `pd all` / `pd files` | across every known list |
 | `pd log [id]` | the ledger |
 | `pd compact` | archive the log, keep the state |
-| `pd config sort due [--here]` | global, or this project only |
+| `pd config sort due [--project]` | global, or this project only |
 
 Dates are ordinary English: `fri`, `tomorrow 9am`, `next tue`, `in 3 days`, `dec 25`,
 `2026-12-25 15:00`. A weekday means *today* if today is that weekday, and a bare time

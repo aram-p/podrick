@@ -2,7 +2,7 @@
 name = "podrick"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.82"
+rust-version = "1.85"
 description = "A terminal task tracker with a perfect memory, built for agents first"
 license = "MIT"
 repository = "https://github.com/aram-p/podrick"
