@@ -45,6 +45,9 @@ pub struct State {
     /// Insertion order, always.
     pub tasks: Vec<Task>,
     pub last_seq: u64,
+    /// The `order` the next created task will take. Carried on the state rather than
+    /// recomputed, so applying one event stays O(tasks) instead of O(tasks) per scan.
+    next_order: u64,
 }
 
 /// Would giving `child` the parent `new_parent` close a loop?
@@ -75,103 +78,108 @@ fn closes_cycle(tasks: &[Task], child: &str, new_parent: &str) -> bool {
 
 impl State {
     pub fn replay(events: &[Event]) -> State {
-        let mut tasks: Vec<Task> = Vec::new();
-        let mut last_seq = 0u64;
-        let mut next_order = 0u64;
-
+        let mut state = State::default();
         for e in events {
-            last_seq = last_seq.max(e.seq);
+            state.apply(e);
+        }
+        state
+    }
 
-            if e.ev == Kind::Compacted {
-                // A snapshot replaces everything before it.
-                if let Some(snap) = &e.data.snapshot {
-                    tasks = snap.clone();
-                    next_order = tasks.iter().map(|t| t.order + 1).max().unwrap_or(0);
-                }
-                continue;
+    /// Fold one event into the state.
+    ///
+    /// The whole of replay is this function in a loop, which is what lets a command
+    /// building several events at once — `pd batch` — validate each one against the state
+    /// its predecessors leave behind, without replaying the log from the top every time.
+    pub fn apply(&mut self, e: &Event) {
+        self.last_seq = self.last_seq.max(e.seq);
+
+        if e.ev == Kind::Compacted {
+            // A snapshot replaces everything before it.
+            if let Some(snap) = &e.data.snapshot {
+                self.tasks = snap.clone();
+                self.next_order = self.tasks.iter().map(|t| t.order + 1).max().unwrap_or(0);
             }
-
-            if e.ev == Kind::Created {
-                // A parent that would close a loop is dropped, not obeyed. Keeping the
-                // task at the root costs a level of nesting; honouring the cycle costs
-                // every later tree walk.
-                let parent = match &e.data.parent {
-                    Some(p) if closes_cycle(&tasks, &e.id, p) => None,
-                    other => other.clone(),
-                };
-                tasks.push(Task {
-                    id: e.id.clone(),
-                    text: e.data.text.clone().unwrap_or_default(),
-                    state: TaskState::Open,
-                    priority: e.data.priority,
-                    due: e.data.due.clone(),
-                    parent,
-                    created_at: e.ts.clone(),
-                    completed_at: None,
-                    order: next_order,
-                });
-                next_order += 1;
-                continue;
-            }
-
-            // Resolved before the mutable borrow below, since it has to read the rest of
-            // the tree. `None` here means "leave the parent alone".
-            let move_to = if e.ev == Kind::Moved {
-                let to = e.data.to_parent.as_ref().and_then(|v| v.as_str());
-                match to {
-                    Some(p) if closes_cycle(&tasks, &e.id, p) => None,
-                    Some(p) => Some(Some(p.to_string())),
-                    None => Some(None),
-                }
-            } else {
-                None
-            };
-
-            let Some(t) = tasks.iter_mut().find(|t| t.id == e.id) else {
-                // An event for a task we never saw created. Skip rather than invent one.
-                continue;
-            };
-
-            match e.ev {
-                Kind::Completed => {
-                    t.state = TaskState::Done;
-                    t.completed_at = Some(e.ts.clone());
-                }
-                Kind::Uncompleted => {
-                    t.state = TaskState::Open;
-                    t.completed_at = None;
-                }
-                Kind::Dropped => {
-                    t.state = TaskState::Dropped;
-                    t.completed_at = Some(e.ts.clone());
-                }
-                Kind::Edited => {
-                    if let Some(to) = e.data.to.as_ref().and_then(|v| v.as_str()) {
-                        t.text = to.to_string();
-                    }
-                }
-                Kind::Reprioritized => {
-                    t.priority = e.data.to.as_ref().and_then(|v| v.as_u64()).map(|n| n as u8);
-                }
-                Kind::Rescheduled => {
-                    t.due = e
-                        .data
-                        .to
-                        .as_ref()
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                }
-                Kind::Moved => {
-                    if let Some(p) = move_to {
-                        t.parent = p;
-                    }
-                }
-                Kind::Noted => {}
-                Kind::Created | Kind::Compacted => unreachable!("handled above"),
-            }
+            return;
         }
 
-        State { tasks, last_seq }
+        if e.ev == Kind::Created {
+            // A parent that would close a loop is dropped, not obeyed. Keeping the
+            // task at the root costs a level of nesting; honouring the cycle costs
+            // every later tree walk.
+            let parent = match &e.data.parent {
+                Some(p) if closes_cycle(&self.tasks, &e.id, p) => None,
+                other => other.clone(),
+            };
+            self.tasks.push(Task {
+                id: e.id.clone(),
+                text: e.data.text.clone().unwrap_or_default(),
+                state: TaskState::Open,
+                priority: e.data.priority,
+                due: e.data.due.clone(),
+                parent,
+                created_at: e.ts.clone(),
+                completed_at: None,
+                order: self.next_order,
+            });
+            self.next_order += 1;
+            return;
+        }
+
+        // Resolved before the mutable borrow below, since it has to read the rest of
+        // the tree. `None` here means "leave the parent alone".
+        let move_to = if e.ev == Kind::Moved {
+            let to = e.data.to_parent.as_ref().and_then(|v| v.as_str());
+            match to {
+                Some(p) if closes_cycle(&self.tasks, &e.id, p) => None,
+                Some(p) => Some(Some(p.to_string())),
+                None => Some(None),
+            }
+        } else {
+            None
+        };
+
+        let Some(t) = self.tasks.iter_mut().find(|t| t.id == e.id) else {
+            // An event for a task we never saw created. Skip rather than invent one.
+            return;
+        };
+
+        match e.ev {
+            Kind::Completed => {
+                t.state = TaskState::Done;
+                t.completed_at = Some(e.ts.clone());
+            }
+            Kind::Uncompleted => {
+                t.state = TaskState::Open;
+                t.completed_at = None;
+            }
+            Kind::Dropped => {
+                t.state = TaskState::Dropped;
+                t.completed_at = Some(e.ts.clone());
+            }
+            Kind::Edited => {
+                if let Some(to) = e.data.to.as_ref().and_then(|v| v.as_str()) {
+                    t.text = to.to_string();
+                }
+            }
+            Kind::Reprioritized => {
+                t.priority = e.data.to.as_ref().and_then(|v| v.as_u64()).map(|n| n as u8);
+            }
+            Kind::Rescheduled => {
+                t.due = e
+                    .data
+                    .to
+                    .as_ref()
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+            }
+            Kind::Moved => {
+                if let Some(p) = move_to {
+                    t.parent = p;
+                }
+            }
+            Kind::Noted => {}
+            Kind::Created | Kind::Compacted => unreachable!("handled above"),
+        }
     }
 
     pub fn get(&self, id: &str) -> Option<&Task> {
