@@ -42,10 +42,15 @@ tens of thousands of events is sub-millisecond, so SQLite buys nothing at this s
 | What | Where |
 | --- | --- |
 | Per-project file | `.podrick` at the git repo root, else cwd |
-| Global file | `~/.local/share/podrick/global.podrick` |
-| Registry | `~/.local/share/podrick/registry.jsonl` |
-| Config | `~/.config/podrick/config.toml` |
+| Global file | `<data>/podrick/global.podrick` |
+| Registry | `<data>/podrick/registry.jsonl` |
+| Config | `<config>/podrick/config.toml` |
 | Compaction archive | `.podrick.archive` next to the file |
+
+`<data>` and `<config>` are the platform directories, via the `dirs` crate: on Linux
+`~/.local/share` and `~/.config`, on macOS `~/Library/Application Support` for both. Not
+XDG on macOS — `XDG_DATA_HOME` is ignored there, so anything isolating podrick for a test
+must set `HOME`.
 
 ### 2.3 File resolution
 
@@ -69,7 +74,9 @@ On every command, in order:
 5. **Nothing found** → depends on the caller:
    - **TTY**: prompt `No task file for <dir>. Create one here? [Y/n]`. On yes, create at
      the git root (else cwd), print `created .podrick in <dir>`, and prompt once to add
-     `.podrick` to `.gitignore` if in a git repo.
+     `.podrick*` to `.gitignore` if in a git repo. The glob, so that the lock and the
+     archive are covered too. **The prompt is TTY-only** — an agent-created file is not
+     gitignored, because the tool will not prompt and will not decide silently.
    - **Not a TTY**: **refuse.** Exit 1 with an actionable error naming `--here`,
      `-f <path>`, and `-g`. Agents must opt into file creation deliberately.
 
@@ -181,7 +188,7 @@ pd list [-a|--all] [--sort K] [-p N]
 pd all                          across every registered file
 pd log [<id>]                   the ledger
 pd compact
-pd config [sort K] [--here]     no args = print resolved config chain
+pd config [sort K] [--project]  no args = print resolved config chain
 pd files                        registry contents
 ```
 
