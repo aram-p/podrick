@@ -830,6 +830,44 @@ fn an_adopted_file_is_announced_on_writes_and_kept_quiet_on_reads() {
     );
 }
 
+/// A global flag that takes a value used to swallow the subcommand after it: argv
+/// normalisation asked clap which flags take values, clap had not been built yet and so
+/// answered "none", and `pd --file x add hi` became `pd list --file x add hi` — a search
+/// for "add hi" that quietly added nothing.
+#[test]
+fn a_value_taking_global_flag_does_not_swallow_the_command_after_it() {
+    let s = Sandbox::new();
+    let file = s.path().join("side.podrick");
+    let file = file.to_str().unwrap();
+
+    for form in [
+        vec!["--file", file, "add", "written"],
+        vec!["-f", file, "add", "written twice"],
+    ] {
+        let out = s.pd().args(&form).output().expect("run pd");
+        assert!(
+            out.status.success(),
+            "`pd {}` failed: {}",
+            form.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    let v = s.json(&["--file", file, "list", "--json"]);
+    assert_eq!(
+        order(&v),
+        ["written", "written twice"],
+        "both adds have to have landed"
+    );
+
+    // And the implied `list` still gets inserted when there really is no subcommand.
+    assert_eq!(
+        order(&s.json(&["--file", file, "twice", "--json"])),
+        ["written twice"],
+        "a bare filter after a value flag is still a search"
+    );
+}
+
 #[test]
 fn a_batch_is_one_undoable_action() {
     let s = Sandbox::new();

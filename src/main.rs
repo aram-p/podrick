@@ -42,7 +42,13 @@ fn normalize_args(raw: Vec<String>) -> Vec<String> {
     if raw.len() < 2 {
         return raw;
     }
-    let cmd = Cli::command();
+    // Built, not merely constructed: clap fills in `num_args` from each argument's action
+    // during the build, and before that it is `None` for every argument that did not set
+    // it by hand — which is all of them. Reading it off an unbuilt command said that
+    // nothing takes a value, so `pd --file x add hi` inserted `list` in front of `add`
+    // and quietly searched for "add hi" instead of adding it.
+    let mut cmd = Cli::command();
+    cmd.build();
     let known: Vec<String> = cmd
         .get_subcommands()
         .map(|s| s.get_name().to_string())
