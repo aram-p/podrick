@@ -159,9 +159,12 @@ pub enum Cmd {
     /// List tasks (the default when no command is given)
     #[command(after_help = "EXAMPLE\n  pd list --all --sort due")]
     List {
-        /// Include done and dropped tasks
+        /// Include dropped tasks too
         #[arg(short = 'a', long)]
         all: bool,
+        /// Open tasks only — hide the done ones shown by default
+        #[arg(short = 'o', long, conflicts_with = "all")]
+        open: bool,
         /// One-shot sort: priority, due, created, alpha
         #[arg(long, value_name = "KEY")]
         sort: Option<String>,

@@ -191,13 +191,19 @@ pd note   <path|id> -m <note>
 
 pd batch                        many changes, one undo — ops as JSONL on stdin
 
-pd list [-a|--all] [--sort K] [-p N]
+pd list [-a|--all] [-o|--open] [--sort K] [-p N]
 pd all                          across every registered file
 pd log [<id>]                   the ledger
 pd compact
 pd config [sort K] [--project]  no args = print resolved config chain
 pd files                        registry contents
 ```
+
+`pd list` shows open tasks as a tree and the done ones as a flat block beneath it. Done is
+shown by default: a tracker that hides its own evidence of progress is dispiriting to look
+at, and "what did I finish today" is asked as often as "what is left". Dropped is a
+different claim — *decided against this* — so it waits for `-a/--all`. `-o/--open` is the
+open-only view, and the two flags conflict.
 
 17 verbs. Global flags: `-g`, `-f <path>`, `--here`, `--json`, `--no-color`,
 and the hidden `--now <iso>` (see §9).

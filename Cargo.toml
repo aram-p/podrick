@@ -1,6 +1,6 @@
 [package]
 name = "podrick"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.85"
 description = "A terminal task tracker with a perfect memory, built for agents first"

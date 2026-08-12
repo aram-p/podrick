@@ -8,6 +8,27 @@ Changes to the three versioned contracts — JSON payloads, exit codes, and the 
 are always listed under their own heading, because those are the ones that can break a
 caller. A log written by any older `pd` must always still replay.
 
+## 0.2.0
+
+### Changed
+
+- **`pd list` shows done tasks by default.** They render as a flat block under the open
+  tree, the same place `--all` has always put them. A tracker that hides its own evidence
+  of progress is dispiriting to look at, and "what did I finish today" gets asked about as
+  often as "what is left". Dropped tasks are a different claim — *decided against this* —
+  and still wait behind `-a/--all`.
+- **`-a/--all` now means "dropped too".** Its old effect — adding the done tasks — is the
+  default, so in practice it only changes what you see if something was dropped.
+
+### Added
+
+- **`-o/--open` on `pd list`**, for the old open-only view. Conflicts with `--all`.
+
+### JSON payloads
+
+- `pd list --json` returns the done tasks too, unless `--open` is passed. A caller that
+  wants only open tasks should pass `--open` or filter on `state`.
+
 ## 0.1.2
 
 ### Fixed

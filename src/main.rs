@@ -240,16 +240,21 @@ fn run(cli: &Cli) -> Result<()> {
     let ctx = Ctx::build(cli)?;
 
     match &cli.cmd {
-        None => cmd_list(cli, &ctx, false, None, None, &[]),
+        None => cmd_list(cli, &ctx, render::Show::default(), None, None, &[]),
         Some(Cmd::List {
             all,
+            open,
             sort,
             priority,
             filter,
         }) => cmd_list(
             cli,
             &ctx,
-            *all,
+            match (*all, *open) {
+                (true, _) => render::Show::All,
+                (_, true) => render::Show::Open,
+                _ => render::Show::Done,
+            },
             sort.as_deref(),
             priority.as_deref(),
             filter,
@@ -640,7 +645,7 @@ fn pri_label(p: Option<u8>) -> String {
 fn cmd_list(
     cli: &Cli,
     ctx: &Ctx,
-    all: bool,
+    show: render::Show,
     sort: Option<&str>,
     priority: Option<&str>,
     filter: &[String],
@@ -662,7 +667,7 @@ fn cmd_list(
     // parent that did not match, and a detached child renders indented under whatever row
     // happens to precede it.
     let selection = render::Filter::text(filter.as_deref()).with_priority(want);
-    let rows = render::tree_rows(&open.store.state, all, &selection, key);
+    let rows = render::tree_rows(&open.store.state, show, &selection, key);
 
     if ctx.json {
         let paths = open.store.state.paths();
@@ -682,7 +687,10 @@ fn cmd_list(
             (Some(f), Some(p)) => format!("nothing matching {f:?} at {}", pri_label(p)),
             (Some(f), None) => format!("nothing matching {f:?}"),
             (None, Some(p)) => format!("nothing at {}", pri_label(p)),
-            (None, None) => "nothing open".to_string(),
+            // The default view carries done tasks, so an empty one is not "nothing open"
+            // — that would be a lie in a list where everything is finished.
+            (None, None) if show == render::Show::Open => "nothing open".to_string(),
+            (None, None) => "nothing here".to_string(),
         };
         println!("{}", ctx.style.dim(&msg));
         return Ok(());
@@ -1756,7 +1764,12 @@ fn cmd_all(ctx: &Ctx) -> Result<()> {
         };
         // Each file is shown in its own configured order, so `pd all` and `pd list` never
         // disagree about how the same project is sorted.
-        let rows = render::tree_rows(&st.state, false, &render::Filter::default(), e.sort);
+        let rows = render::tree_rows(
+            &st.state,
+            render::Show::Open,
+            &render::Filter::default(),
+            e.sort,
+        );
         if rows.is_empty() {
             continue;
         }

@@ -11,6 +11,8 @@ A terminal task tracker with a perfect memory, built for agents first.
     ○ ship the migration         3d ago     hwx
     ○ rewrite the intro                     e4y
 
+    ● cut the 0.1 release        1d ago     a7f
+
   6 open · 1 done
 ```
 
@@ -75,13 +77,16 @@ pd flaky                               # substring search
 Tasks live in a `.podrick` file at the root of whatever git repo you are in, so each
 project has its own list. `-g` uses a global one. `pd all` shows every list at once.
 
+The list shows open tasks as a tree and what you finished as a flat block underneath.
+`-o` hides the done ones; `-a` adds the dropped ones.
+
 | | |
 | --- | --- |
 | `pd add <text>` | `-p p1..p4`, `-d <when>`, `--under <path\|id>` |
 | `pd done` / `reopen` / `drop` | `-m <note>` on any of them |
 | `pd undo` | reverts the last action, cascades included |
 | `pd edit` / `pri` / `due` / `mv` / `note` | change one field |
-| `pd list` | `-a/--all`, `--sort priority\|due\|created\|alpha`, `-p` |
+| `pd list` | `-o/--open`, `-a/--all`, `--sort priority\|due\|created\|alpha`, `-p` |
 | `pd batch` | many changes, one undo — ops as JSONL on stdin |
 | `pd all` / `pd files` | across every known list |
 | `pd log [id]` | the ledger |

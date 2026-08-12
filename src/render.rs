@@ -317,6 +317,34 @@ impl Filter {
     }
 }
 
+/// Which closed tasks a listing carries under its open tree.
+///
+/// Done tasks are shown by default: a list you finished things on should say so, and a
+/// task tracker that hides its own evidence of progress is dispiriting to look at.
+/// Dropped is a different claim — "decided against this" — and belongs with `--all`
+/// rather than in the everyday view.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Show {
+    /// Open tasks only, the pre-0.2 default. `pd list --open`.
+    Open,
+    /// Open and done. The default.
+    #[default]
+    Done,
+    /// Everything, dropped included. `pd list --all`.
+    All,
+}
+
+impl Show {
+    /// Whether a closed task of this state belongs in the listing.
+    fn admits(self, state: TaskState) -> bool {
+        match self {
+            Show::Open => false,
+            Show::Done => state == TaskState::Done,
+            Show::All => true,
+        }
+    }
+}
+
 /// Build rows for the default tree view.
 ///
 /// `sort` orders siblings **during** the walk, while the tree is still a tree. An earlier
@@ -324,12 +352,7 @@ impl Filter {
 /// adjacency out of the flat list, which mistook "a depth-2 row after a depth-1 row" for
 /// "a child of it" and glued unrelated subtrees together. `filter` is applied in the same
 /// walk, and for the same reason.
-pub fn tree_rows(
-    state: &State,
-    include_all: bool,
-    filter: &Filter,
-    sort: Option<Sort>,
-) -> Vec<Row> {
+pub fn tree_rows(state: &State, show: Show, filter: &Filter, sort: Option<Sort>) -> Vec<Row> {
     let paths = state.paths();
     let mut rows = Vec::new();
 
@@ -349,11 +372,14 @@ pub fn tree_rows(
         rows.extend(subtree);
     }
 
-    if include_all {
+    if show != Show::Open {
+        // Closed tasks sit in a flat block under the tree rather than back under their
+        // parents. The open tree is the part you act on, and it stays legible only if
+        // finished work does not push its live siblings apart.
         let mut closed: Vec<&crate::state::Task> = state
             .tasks
             .iter()
-            .filter(|t| !t.state.is_open() && filter.admits(t))
+            .filter(|t| !t.state.is_open() && show.admits(t.state) && filter.admits(t))
             .collect();
         closed.sort_by_key(|t| t.order);
         for (i, t) in closed.iter().enumerate() {
@@ -675,7 +701,7 @@ mod tests {
             ("bbb", "child of b", Some("aaa"), None),
             ("ccc", "a-parent", None, Some(1)),
         ]);
-        let rs = tree_rows(&st, false, &Filter::default(), Some(Sort::Priority));
+        let rs = tree_rows(&st, Show::Open, &Filter::default(), Some(Sort::Priority));
         assert_eq!(rs[0].id, "ccc", "p1 root sorts first");
         assert_eq!(rs[1].id, "aaa");
         assert_eq!(rs[2].id, "bbb", "the child stayed with its parent");
@@ -685,7 +711,7 @@ mod tests {
     #[test]
     fn alpha_sort_orders_siblings() {
         let st = state_of(&[("aaa", "zebra", None, None), ("bbb", "apple", None, None)]);
-        let rs = tree_rows(&st, false, &Filter::default(), Some(Sort::Alpha));
+        let rs = tree_rows(&st, Show::Open, &Filter::default(), Some(Sort::Alpha));
         assert_eq!(rs[0].text, "apple");
     }
 
@@ -699,7 +725,7 @@ mod tests {
             ("ccc", "ekko child", Some("bbb"), Some(1)),
             ("ddd", "apple", None, Some(1)),
         ]);
-        let rs = tree_rows(&st, false, &Filter::default(), Some(Sort::Alpha));
+        let rs = tree_rows(&st, Show::Open, &Filter::default(), Some(Sort::Alpha));
 
         let order: Vec<&str> = rs.iter().map(|r| r.text.as_str()).collect();
         assert_eq!(order, ["apple", "dee parent", "ekko child", "zebra"]);
@@ -721,7 +747,7 @@ mod tests {
             ("ccc", "unrelated", None, Some(4)),
         ]);
         let f = Filter::default().with_priority(Some(Some(1)));
-        let rs = tree_rows(&st, false, &f, None);
+        let rs = tree_rows(&st, Show::Open, &f, None);
 
         let order: Vec<&str> = rs.iter().map(|r| r.text.as_str()).collect();
         assert_eq!(order, ["ship the migration", "backfill in batches"]);
@@ -739,7 +765,7 @@ mod tests {
             ("ccc", "not urgent", Some("aaa"), Some(4)),
         ]);
         let f = Filter::default().with_priority(Some(Some(1)));
-        let rs = tree_rows(&st, false, &f, None);
+        let rs = tree_rows(&st, Show::Open, &f, None);
 
         let order: Vec<&str> = rs.iter().map(|r| r.text.as_str()).collect();
         assert_eq!(order, ["parent", "urgent"]);
@@ -754,7 +780,7 @@ mod tests {
             ("bbb", "unranked", None, None),
         ]);
         let f = Filter::default().with_priority(Some(None));
-        let rs = tree_rows(&st, false, &f, None);
+        let rs = tree_rows(&st, Show::Open, &f, None);
         assert_eq!(rs.len(), 1);
         assert_eq!(rs[0].text, "unranked");
     }
@@ -767,7 +793,7 @@ mod tests {
             ("ccc", "read the parser", None, Some(1)),
         ]);
         let f = Filter::text(Some("write")).with_priority(Some(Some(1)));
-        let rs = tree_rows(&st, false, &f, None);
+        let rs = tree_rows(&st, Show::Open, &f, None);
         assert_eq!(rs.len(), 1);
         assert_eq!(rs[0].text, "write the parser");
     }

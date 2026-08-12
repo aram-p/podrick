@@ -157,10 +157,11 @@ fn list_flags_work_without_naming_list() {
     s.run(&["done", &id]);
     s.add(&["decide on the TUI"]);
 
-    let open = s.json(&["--json"]);
-    assert_eq!(open["tasks"].as_array().unwrap().len(), 1, "done is hidden");
+    let open = s.json(&["-o", "--json"]);
+    assert_eq!(open["tasks"].as_array().unwrap().len(), 1, "-o hides done");
 
     for form in [
+        vec!["--json"],
         vec!["-a", "--json"],
         vec!["--all", "--json"],
         vec!["list", "-a", "--json"],
@@ -185,6 +186,37 @@ fn list_flags_work_without_naming_list() {
     assert!(
         help.contains("Commands:"),
         "top-level help survives normalisation: {help:?}"
+    );
+}
+
+/// Done is evidence of progress and belongs in the everyday view. Dropped is a different
+/// claim — "decided against this" — and stays behind `--all`.
+#[test]
+fn done_shows_by_default_but_dropped_does_not() {
+    let s = Sandbox::new();
+    let finished = s.add(&["archive the old logs"]);
+    let abandoned = s.add(&["rewrite it in Haskell"]);
+    s.add(&["decide on the TUI"]);
+    s.run(&["done", &finished]);
+    s.run(&["drop", &abandoned]);
+
+    let texts = order(&s.json(&["--json"]));
+    assert_eq!(
+        texts,
+        vec!["decide on the TUI", "archive the old logs"],
+        "the default carries done, under the open tree, and not dropped"
+    );
+
+    assert_eq!(
+        order(&s.json(&["-o", "--json"])),
+        vec!["decide on the TUI"],
+        "-o is the old open-only view"
+    );
+
+    let all = order(&s.json(&["-a", "--json"]));
+    assert!(
+        all.contains(&"rewrite it in Haskell".to_string()),
+        "--all reaches the dropped one: {all:?}"
     );
 }
 
