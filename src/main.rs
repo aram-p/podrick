@@ -22,6 +22,7 @@ use clap::{CommandFactory, Parser};
 use serde_json::{json, Value};
 
 use cli::{Cli, Cmd};
+use config::Sort;
 use error::{AppError, Result};
 use event::{Actor, Data, Event, Kind};
 use render::Style;
@@ -559,28 +560,19 @@ fn command_schema() -> Value {
 // Commands
 // ---------------------------------------------------------------------------
 
-fn effective_sort(cli_sort: Option<&str>, open: &Open) -> Result<Option<String>> {
+/// Flag beats project setting beats global config beats insertion order. Every one of
+/// those is parsed into a `Sort` at its own boundary, so an unknown key fails the same
+/// way whichever of the three it came from.
+fn effective_sort(cli_sort: Option<&str>, open: &Open) -> Result<Option<Sort>> {
     if let Some(s) = cli_sort {
-        validate_sort(s)?;
-        return Ok(Some(s.to_string()));
+        return Ok(Some(s.parse()?));
     }
     if let Some(e) = open.registry.get(&open.resolved.path) {
-        if let Some(s) = &e.sort {
-            return Ok(Some(s.clone()));
+        if let Some(s) = e.sort {
+            return Ok(Some(s));
         }
     }
     Ok(config::Config::load()?.sort)
-}
-
-fn validate_sort(s: &str) -> Result<()> {
-    if config::SORT_KEYS.contains(&s) {
-        Ok(())
-    } else {
-        Err(AppError::usage(format!(
-            "unknown sort key {s:?}; use one of {}",
-            config::SORT_KEYS.join(", ")
-        )))
-    }
 }
 
 fn cmd_list(
@@ -599,15 +591,23 @@ fn cmd_list(
         Some(filter)
     };
 
-    let mut rows = render::tree_rows(&open.store.state, all, filter.as_deref());
+    let key = effective_sort(sort, &open)?;
+    let mut rows = render::tree_rows(&open.store.state, all, filter.as_deref(), key);
 
     if let Some(p) = priority {
         let want = cli::parse_priority(p).map_err(AppError::usage)?;
         rows.retain(|r| r.priority == want);
-    }
-
-    if let Some(key) = effective_sort(sort, &open)? {
-        render::sort_rows(&mut rows, &key, &open.store.state, ctx.now);
+        // Selecting by priority cuts across the tree, so the survivors are a worklist,
+        // not a tree — a kept child whose parent was filtered out would otherwise render
+        // indented under whichever unrelated row happened to precede it. Flatten and
+        // re-sort; the `path` column still reports where each task really lives.
+        for r in rows.iter_mut() {
+            r.depth = 1;
+            r.gap = false;
+        }
+        if let Some(key) = key {
+            render::sort_flat(&mut rows, key);
+        }
     }
 
     if ctx.json {
@@ -1245,19 +1245,19 @@ fn cmd_config(
 
     match (key, value) {
         (Some("sort"), Some(v)) => {
-            validate_sort(v)?;
+            let parsed: Sort = v.parse()?;
             if here {
                 let mut o = opened.ok_or_else(|| {
                     AppError::not_found("--here needs a task file in this directory")
                 })?;
                 let ts = ctx.ts();
-                o.registry.upsert(&o.resolved.path, &ts).sort = Some(v.to_string());
+                o.registry.upsert(&o.resolved.path, &ts).sort = Some(parsed);
                 o.registry.save()?;
                 if !ctx.json {
                     println!("sort = {v} for {}", o.resolved.path.display());
                 }
             } else {
-                cfg.sort = Some(v.to_string());
+                cfg.sort = Some(parsed);
                 cfg.save()?;
                 if !ctx.json {
                     println!("sort = {v} globally");
@@ -1280,15 +1280,15 @@ fn cmd_config(
     let project = opened
         .as_ref()
         .and_then(|o| o.registry.get(&o.resolved.path))
-        .and_then(|e| e.sort.clone());
-    let effective = project.clone().or_else(|| cfg.sort.clone());
+        .and_then(|e| e.sort);
+    let effective = project.or(cfg.sort);
 
     if ctx.json {
         ctx.emit(json!({
             "sort": {
-                "effective": effective.clone().unwrap_or_else(|| "insertion".into()),
-                "project": project,
-                "global": cfg.sort,
+                "effective": effective.map_or("insertion", Sort::as_str),
+                "project": project.map(Sort::as_str),
+                "global": cfg.sort.map(Sort::as_str),
                 "default": "insertion",
             }
         }));
@@ -1304,23 +1304,20 @@ fn cmd_config(
     println!(
         "  {}  {}",
         ctx.style.dim("project     "),
-        project
-            .clone()
-            .unwrap_or_else(|| ctx.style.dim("unset").to_string())
+        project.map_or_else(|| ctx.style.dim("unset"), |s| s.to_string())
     );
     println!(
         "  {}  {}",
         ctx.style.dim("global      "),
         cfg.sort
-            .clone()
-            .unwrap_or_else(|| ctx.style.dim("unset").to_string())
+            .map_or_else(|| ctx.style.dim("unset"), |s| s.to_string())
     );
     println!("  {}  insertion", ctx.style.dim("default     "));
     println!(
         "\n{}",
         ctx.style.accent(&format!(
             "→ {}",
-            effective.unwrap_or_else(|| "insertion".into())
+            effective.map_or("insertion", Sort::as_str)
         ))
     );
     Ok(())
@@ -1370,7 +1367,9 @@ fn cmd_all(ctx: &Ctx) -> Result<()> {
         let Ok(st) = store::load(&e.path) else {
             continue;
         };
-        let rows = render::tree_rows(&st.state, false, None);
+        // Each file is shown in its own configured order, so `pd all` and `pd list` never
+        // disagree about how the same project is sorted.
+        let rows = render::tree_rows(&st.state, false, None, e.sort);
         if rows.is_empty() {
             continue;
         }

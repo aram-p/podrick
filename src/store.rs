@@ -9,6 +9,7 @@ use std::process::Command;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
+use crate::config::Sort;
 use crate::error::{AppError, Result};
 use crate::event::{self, Event};
 use crate::state::State;
@@ -90,6 +91,15 @@ fn normalize_remote(url: &str) -> String {
 // Registry
 // ---------------------------------------------------------------------------
 
+/// An unrecognised sort key becomes `None` rather than failing the whole entry.
+fn lenient_sort<'de, D>(d: D) -> std::result::Result<Option<Sort>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<String>::deserialize(d)?;
+    Ok(raw.and_then(|s| s.parse().ok()))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegEntry {
     pub path: PathBuf,
@@ -98,8 +108,14 @@ pub struct RegEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_used: Option<String>,
     /// Per-project sort override. Config, not history — so it lives here, not in the log.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sort: Option<String>,
+    ///
+    /// Parsed leniently: `Registry::load` drops any line it cannot deserialize, so a
+    /// strict field here would cost the entry its remote and last-used too — the whole
+    /// record thrown away over one setting. An unreadable value degrades to "unset"
+    /// instead. `config.toml` is stricter, because it is written by hand.
+    #[serde(default, deserialize_with = "lenient_sort")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort: Option<Sort>,
     /// Last time we nudged about compaction, so it stays at most daily.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_nudge: Option<String>,

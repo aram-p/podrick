@@ -3,8 +3,9 @@
 
 use chrono::{DateTime, Local};
 
+use crate::config::Sort;
 use crate::dates;
-use crate::state::{State, TaskState};
+use crate::state::{State, Task, TaskState};
 
 const RESET: &str = "\x1b[0m";
 const DIM: &str = "\x1b[2m";
@@ -167,7 +168,17 @@ fn due_visible_len(due: &Option<String>, now: DateTime<Local>) -> usize {
 }
 
 /// Build rows for the default tree view.
-pub fn tree_rows(state: &State, include_all: bool, filter: Option<&str>) -> Vec<Row> {
+///
+/// `sort` orders siblings **during** the walk, while the tree is still a tree. An earlier
+/// version flattened first and then tried to rediscover the structure by reading depth
+/// adjacency out of the flat list, which mistook "a depth-2 row after a depth-1 row" for
+/// "a child of it" and glued unrelated subtrees together.
+pub fn tree_rows(
+    state: &State,
+    include_all: bool,
+    filter: Option<&str>,
+    sort: Option<Sort>,
+) -> Vec<Row> {
     let paths = state.paths();
     let mut rows = Vec::new();
     let needle = filter.map(|f| f.to_lowercase());
@@ -182,8 +193,8 @@ pub fn tree_rows(state: &State, include_all: bool, filter: Option<&str>) -> Vec<
     // A blank line separates subtrees, but only where one actually exists. Flat lists
     // stay tight — the default view of ten items has to fit on a glance.
     let mut prev_had_children = false;
-    for root in state.open_roots() {
-        let mut subtree = collect(state, root, 1, &paths, &needle);
+    for root in ordered(state.open_roots(), sort) {
+        let mut subtree = collect(state, root, 1, &paths, &needle, sort);
         if subtree.is_empty() {
             continue;
         }
@@ -225,11 +236,11 @@ fn collect(
     depth: usize,
     paths: &crate::state::Paths,
     needle: &Option<String>,
+    sort: Option<Sort>,
 ) -> Vec<Row> {
-    let children: Vec<Row> = state
-        .open_children(&task.id)
+    let children: Vec<Row> = ordered(state.open_children(&task.id), sort)
         .into_iter()
-        .flat_map(|c| collect(state, c, depth + 1, paths, needle))
+        .flat_map(|c| collect(state, c, depth + 1, paths, needle, sort))
         .collect();
 
     let self_matches = match needle {
@@ -257,80 +268,75 @@ fn collect(
     out
 }
 
-/// Sort siblings within the tree. Never flattens: the tree structure always wins.
-pub fn sort_rows(rows: &mut [Row], key: &str, state: &State, now: DateTime<Local>) {
-    // Rows are a pre-order flattening, so sorting in place would break the tree. Sort
-    // sibling groups by rebuilding runs of equal depth under the same parent.
-    let _ = (state, now);
-    sort_runs(rows, key, now);
+/// Order one set of siblings. Subtrees move with their parent because they are still
+/// attached to it, not because an algorithm inferred the attachment afterwards.
+fn ordered(mut tasks: Vec<&Task>, sort: Option<Sort>) -> Vec<&Task> {
+    let Some(key) = sort else {
+        return tasks; // insertion order, which open_roots/open_children already give
+    };
+    // Stable, so equal keys keep insertion order rather than an arbitrary one.
+    tasks.sort_by(|a, b| cmp_tasks(a, b, key));
+    tasks
 }
 
-fn sort_runs(rows: &mut [Row], key: &str, now: DateTime<Local>) {
-    // Identify contiguous runs at the same depth whose members are siblings, and order
-    // each run independently. Subtrees move with their root.
-    let mut i = 0;
-    while i < rows.len() {
-        let depth = rows[i].depth;
-        let mut groups: Vec<(usize, usize)> = Vec::new(); // (start, len) of each subtree
-        let mut j = i;
-        while j < rows.len() && rows[j].depth >= depth {
-            if rows[j].depth == depth {
-                groups.push((j, 1));
-            } else if let Some(last) = groups.last_mut() {
-                last.1 += 1;
-            }
-            j += 1;
+/// The fields any ordering looks at. Tasks and rows both reduce to this, so the sibling
+/// sort and the flat sort cannot drift apart.
+struct SortKey<'a> {
+    priority: Option<u8>,
+    due: Option<&'a str>,
+    text: &'a str,
+    order: u64,
+}
+
+impl<'a> From<&'a Task> for SortKey<'a> {
+    fn from(t: &'a Task) -> SortKey<'a> {
+        SortKey {
+            priority: t.priority,
+            due: t.due.as_deref(),
+            text: &t.text,
+            order: t.order,
         }
-        if groups.len() > 1 {
-            let mut blocks: Vec<Vec<Row>> = groups
-                .iter()
-                .map(|&(s, l)| rows[s..s + l].iter().map(clone_row).collect())
-                .collect();
-            blocks.sort_by(|a, b| cmp_rows(&a[0], &b[0], key, now));
-            let mut out = Vec::new();
-            for b in blocks {
-                out.extend(b);
-            }
-            for (k, r) in out.into_iter().enumerate() {
-                rows[i + k] = r;
-            }
-        }
-        // Recurse into each subtree's children.
-        for &(s, l) in &groups {
-            if l > 1 {
-                sort_runs(&mut rows[s + 1..s + l], key, now);
-            }
-        }
-        i = j;
     }
 }
 
-fn clone_row(r: &Row) -> Row {
-    Row {
-        id: r.id.clone(),
-        path: r.path.clone(),
-        depth: r.depth,
-        text: r.text.clone(),
-        state: r.state,
-        priority: r.priority,
-        due: r.due.clone(),
-        gap: r.gap,
+impl<'a> From<&'a Row> for SortKey<'a> {
+    fn from(r: &'a Row) -> SortKey<'a> {
+        // Rows are already in insertion order when they reach a flat sort, so `order` is
+        // constant and `Sort::Created` degenerates to "leave it alone".
+        SortKey {
+            priority: r.priority,
+            due: r.due.as_deref(),
+            text: &r.text,
+            order: 0,
+        }
     }
 }
 
-fn cmp_rows(a: &Row, b: &Row, key: &str, _now: DateTime<Local>) -> std::cmp::Ordering {
+fn cmp_keys(a: &SortKey, b: &SortKey, key: Sort) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     match key {
-        "priority" => a.priority.unwrap_or(4).cmp(&b.priority.unwrap_or(4)),
-        "due" => match (&a.due, &b.due) {
+        // Unset priority sorts as p4: it is the documented default, not a separate rank.
+        Sort::Priority => a.priority.unwrap_or(4).cmp(&b.priority.unwrap_or(4)),
+        // Dated before undated: a list sorted by due date is a list of what is coming up.
+        Sort::Due => match (a.due, b.due) {
             (Some(x), Some(y)) => x.cmp(y),
             (Some(_), None) => Ordering::Less,
             (None, Some(_)) => Ordering::Greater,
             (None, None) => Ordering::Equal,
         },
-        "alpha" => a.text.to_lowercase().cmp(&b.text.to_lowercase()),
-        _ => Ordering::Equal, // "created" is insertion order, which is what we already have
+        Sort::Alpha => a.text.to_lowercase().cmp(&b.text.to_lowercase()),
+        Sort::Created => a.order.cmp(&b.order),
     }
+}
+
+fn cmp_tasks(a: &Task, b: &Task, key: Sort) -> std::cmp::Ordering {
+    cmp_keys(&a.into(), &b.into(), key)
+}
+
+/// Order an already-flattened list. Used only by the priority filter, which selects tasks
+/// out of the tree and so has no sibling structure left to preserve.
+pub fn sort_flat(rows: &mut [Row], key: Sort) {
+    rows.sort_by(|a, b| cmp_keys(&a.into(), &b.into(), key));
 }
 
 #[cfg(test)]
@@ -379,23 +385,81 @@ mod tests {
         assert!(out.contains('\x1b'));
     }
 
+    /// Sorting now happens during the tree walk, so these go through `tree_rows` rather
+    /// than a post-hoc reordering of a flat list. The assertions are the originals.
+    fn state_of(specs: &[(&str, &str, Option<&str>, Option<u8>)]) -> State {
+        use crate::event::{Actor, Data, Event, Kind};
+        let log: Vec<Event> = specs
+            .iter()
+            .enumerate()
+            .map(|(i, (id, text, parent, pri))| {
+                Event::new(
+                    i as u64 + 1,
+                    format!("2026-08-12T10:{:02}:00+04:00", i),
+                    Actor::Cli,
+                    Kind::Created,
+                    *id,
+                )
+                .with_data(Data {
+                    text: Some((*text).into()),
+                    parent: parent.map(String::from),
+                    priority: *pri,
+                    ..Default::default()
+                })
+            })
+            .collect();
+        State::replay(&log)
+    }
+
     #[test]
     fn sorting_keeps_subtrees_with_their_parent() {
-        let mut rs = vec![
-            row("aaa", "b-parent", 1, Some(3)),
-            row("bbb", "child of b", 2, None),
-            row("ccc", "a-parent", 1, Some(1)),
-        ];
-        sort_rows(&mut rs, "priority", &State::default(), now());
+        let st = state_of(&[
+            ("aaa", "b-parent", None, Some(3)),
+            ("bbb", "child of b", Some("aaa"), None),
+            ("ccc", "a-parent", None, Some(1)),
+        ]);
+        let rs = tree_rows(&st, false, None, Some(Sort::Priority));
         assert_eq!(rs[0].id, "ccc", "p1 root sorts first");
         assert_eq!(rs[1].id, "aaa");
         assert_eq!(rs[2].id, "bbb", "the child stayed with its parent");
+        assert_eq!(rs[2].depth, 2, "and stayed a child");
     }
 
     #[test]
     fn alpha_sort_orders_siblings() {
-        let mut rs = vec![row("aaa", "zebra", 1, None), row("bbb", "apple", 1, None)];
-        sort_rows(&mut rs, "alpha", &State::default(), now());
+        let st = state_of(&[("aaa", "zebra", None, None), ("bbb", "apple", None, None)]);
+        let rs = tree_rows(&st, false, None, Some(Sort::Alpha));
+        assert_eq!(rs[0].text, "apple");
+    }
+
+    /// The defect this replaced: a depth-2 row landing after an unrelated depth-1 row was
+    /// read as its child, so sorting glued foreign subtrees together.
+    #[test]
+    fn a_child_is_never_reattached_to_the_wrong_parent_by_sorting() {
+        let st = state_of(&[
+            ("aaa", "zebra", None, Some(1)),
+            ("bbb", "dee parent", None, Some(2)),
+            ("ccc", "ekko child", Some("bbb"), Some(1)),
+            ("ddd", "apple", None, Some(1)),
+        ]);
+        let rs = tree_rows(&st, false, None, Some(Sort::Alpha));
+
+        let order: Vec<&str> = rs.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(order, ["apple", "dee parent", "ekko child", "zebra"]);
+        let child = rs.iter().find(|r| r.id == "ccc").unwrap();
+        assert_eq!(child.depth, 2);
+        // The row before it is its real parent, not whatever sorted next to it.
+        let pos = rs.iter().position(|r| r.id == "ccc").unwrap();
+        assert_eq!(rs[pos - 1].id, "bbb");
+    }
+
+    #[test]
+    fn a_flat_sort_orders_what_the_priority_filter_selected() {
+        let mut rs = vec![
+            row("aaa", "zebra", 1, Some(1)),
+            row("bbb", "apple", 1, Some(1)),
+        ];
+        sort_flat(&mut rs, Sort::Alpha);
         assert_eq!(rs[0].text, "apple");
     }
 }

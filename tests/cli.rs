@@ -29,6 +29,16 @@ impl Sandbox {
         self.dir.path()
     }
 
+    /// Where `dirs::config_dir()` lands given the sandboxed `HOME` and `XDG_CONFIG_HOME`.
+    /// Both CI platforms run these tests, so both answers have to be right.
+    fn config_dir(&self) -> std::path::PathBuf {
+        if cfg!(target_os = "macos") {
+            self.path().join("Library/Application Support/podrick")
+        } else {
+            self.path().join("cfg/podrick")
+        }
+    }
+
     fn pd(&self) -> Command {
         let mut c = Command::cargo_bin("pd").expect("binary");
         c.current_dir(self.dir.path())
@@ -498,6 +508,67 @@ fn an_unknown_sort_key_is_a_usage_error() {
     let s = Sandbox::new();
     s.add(&["first"]);
     assert_eq!(s.run(&["list", "--sort", "banana"]).status.code(), Some(2));
+}
+
+/// Same bad value, same answer, whichever layer it came from. It used to be exit 2 from
+/// the flag and a silent exit 0 from the file.
+#[test]
+fn an_unknown_sort_key_in_the_config_file_fails_like_the_flag() {
+    let s = Sandbox::new();
+    s.add(&["zebra"]);
+    s.add(&["apple"]);
+
+    let cfg = s.config_dir();
+    std::fs::create_dir_all(&cfg).unwrap();
+    std::fs::write(cfg.join("config.toml"), "sort = \"banana\"\n").unwrap();
+
+    let out = s.run(&["list"]);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "a bad persisted key must not pass"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("banana"), "names the offending value: {err:?}");
+
+    // And a good one still works, so the check is not just refusing everything.
+    std::fs::write(cfg.join("config.toml"), "sort = \"alpha\"\n").unwrap();
+    assert_eq!(order(&s.json(&["list", "--json"])), ["apple", "zebra"]);
+}
+
+/// A priority filter cuts across the tree. Every survivor must be one of the tasks that
+/// matched — never a stray child re-indented under whatever happened to sort above it.
+#[test]
+fn a_priority_filter_never_reparents_what_it_keeps() {
+    let s = Sandbox::new();
+    s.add(&["zebra", "-p1"]);
+    let parent = s.add(&["dee parent", "-p2"]);
+    s.add(&["ekko child", "-p1", "--under", &parent]);
+    s.add(&["apple", "-p1"]);
+
+    // Unfiltered, the tree is intact and only siblings move.
+    assert_eq!(
+        order(&s.json(&["list", "--sort", "alpha", "--json"])),
+        ["apple", "dee parent", "ekko child", "zebra"]
+    );
+
+    // Filtered, the p2 parent is gone and its child sorts on its own merits.
+    assert_eq!(
+        order(&s.json(&["list", "-p", "p1", "--sort", "alpha", "--json"])),
+        ["apple", "ekko child", "zebra"],
+        "the child used to be dragged to the end, glued to an unrelated root"
+    );
+
+    // The rendered tree must not imply a parent that was filtered away.
+    let out = s.run(&["list", "-p", "p1", "--sort", "alpha", "--no-color"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        let shown = line.split('\t').nth(3).unwrap_or("");
+        assert!(
+            !shown.starts_with(' '),
+            "no row may render as someone's subtask here: {line:?}"
+        );
+    }
 }
 
 #[test]
