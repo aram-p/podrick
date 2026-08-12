@@ -175,7 +175,7 @@ pd due    <path|id> <date|none>
 pd mv     <path|id> --under <path|id>
 pd note   <path|id> -m <note>
 
-pd list [--all] [--sort K] [-p N]
+pd list [-a|--all] [--sort K] [-p N]
 pd all                          across every registered file
 pd log [<id>]                   the ledger
 pd compact

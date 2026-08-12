@@ -122,6 +122,46 @@ fn flags_are_not_swallowed_by_unquoted_text() {
     assert_eq!(v["task"]["due"], "2026-08-14");
 }
 
+/// `list` is the implied command, so its own flags have to work without naming it —
+/// including the short ones, which clap will not accept ahead of a subcommand.
+#[test]
+fn list_flags_work_without_naming_list() {
+    let s = Sandbox::new();
+    let id = s.add(&["archive the old logs"]);
+    s.run(&["done", &id]);
+    s.add(&["decide on the TUI"]);
+
+    let open = s.json(&["--json"]);
+    assert_eq!(open["tasks"].as_array().unwrap().len(), 1, "done is hidden");
+
+    for form in [
+        vec!["-a", "--json"],
+        vec!["--all", "--json"],
+        vec!["list", "-a", "--json"],
+    ] {
+        let v = s.json(&form);
+        assert_eq!(
+            v["tasks"].as_array().unwrap().len(),
+            2,
+            "`pd {}` should show the done task too",
+            form.join(" ")
+        );
+    }
+
+    // A short flag *and* a filter: the inserted `list` has to land in front of both.
+    let v = s.json(&["-a", "archive", "--json"]);
+    let texts = order(&v);
+    assert_eq!(texts, vec!["archive the old logs"], "filter still applied");
+
+    // `--help` describes pd, not pd list.
+    let out = s.run(&["--help"]);
+    let help = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        help.contains("Commands:"),
+        "top-level help survives normalisation: {help:?}"
+    );
+}
+
 #[test]
 fn every_payload_carries_the_file_and_seq() {
     let s = Sandbox::new();

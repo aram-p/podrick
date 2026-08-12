@@ -10,6 +10,14 @@ caller. A log written by any older `pd` must always still replay.
 
 ## Unreleased
 
+### Added
+
+- `pd list --all` gained the short form **`-a`**. Because `list` is the implied command,
+  argv normalisation now inserts it at the front rather than in front of the first
+  positional, so `pd -a` and `pd -a <filter>` work as well as `pd list -a` — `list`'s own
+  flags are not global, and clap will not accept them ahead of a subcommand. `pd --help`
+  and `pd --version` are left alone.
+
 ### Changed
 
 - A task file found through discovery is announced only when the command is about to

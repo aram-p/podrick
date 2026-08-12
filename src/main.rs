@@ -34,16 +34,22 @@ const NUDGE_MICROS: u128 = 50_000;
 /// values rather than mistaking one for a subcommand.
 const VALUE_FLAGS: [&str; 4] = ["-f", "--file", "--expect-seq", "--now"];
 
-/// `pd fix the thing` has to mean "search for it", but clap needs a subcommand to attach
-/// the remaining flags to. Insert an explicit `list` in front of the first positional
-/// when it is not a known command, so `pd find me --json` parses like anything else.
+/// `pd fix the thing` has to mean "search for it", and `pd -a` has to mean "list
+/// everything", but clap needs a subcommand to attach either to. When no known command is
+/// present, insert an explicit `list` immediately after argv[0].
+///
+/// It goes at the front rather than in front of the first positional because `list`'s own
+/// flags — `-a`, `--sort` — are not global, so clap will not accept them ahead of the
+/// subcommand. `pd -a decide` has to become `pd list -a decide`, not `pd -a list decide`.
 fn normalize_args(raw: Vec<String>) -> Vec<String> {
+    if raw.len() < 2 {
+        return raw;
+    }
     let known: Vec<String> = Cli::command()
         .get_subcommands()
         .map(|s| s.get_name().to_string())
         .collect();
 
-    let mut out: Vec<String> = raw.iter().take(1).cloned().collect();
     let mut i = 1;
     while i < raw.len() {
         let a = &raw[i];
@@ -51,20 +57,27 @@ fn normalize_args(raw: Vec<String>) -> Vec<String> {
             break;
         }
         if a.starts_with('-') {
-            out.push(a.clone());
-            if VALUE_FLAGS.contains(&a.as_str()) && i + 1 < raw.len() {
+            // `pd --help` and `pd --version` describe the tool itself; rewriting them to
+            // `pd list --help` would answer a question nobody asked.
+            if matches!(a.as_str(), "-h" | "--help" | "-V" | "--version") {
+                return raw;
+            }
+            if VALUE_FLAGS.contains(&a.as_str()) {
                 i += 1;
-                out.push(raw[i].clone());
             }
             i += 1;
             continue;
         }
-        if !known.contains(a) {
-            out.push("list".to_string());
+        // A real subcommand: leave the line exactly as the caller wrote it.
+        if known.contains(a) {
+            return raw;
         }
         break;
     }
-    out.extend_from_slice(&raw[i..]);
+
+    let mut out: Vec<String> = raw.iter().take(1).cloned().collect();
+    out.push("list".to_string());
+    out.extend_from_slice(&raw[1..]);
     out
 }
 

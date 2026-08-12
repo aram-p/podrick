@@ -160,7 +160,7 @@ pub enum Cmd {
     #[command(after_help = "EXAMPLE\n  pd list --all --sort due")]
     List {
         /// Include done and dropped tasks
-        #[arg(long)]
+        #[arg(short = 'a', long)]
         all: bool,
         /// One-shot sort: priority, due, created, alpha
         #[arg(long, value_name = "KEY")]

@@ -53,7 +53,7 @@ project has its own list. `-g` uses a global one. `pd all` shows every list at o
 | `pd done` / `reopen` / `drop` | `-m <note>` on any of them |
 | `pd undo` | reverts the last action, cascades included |
 | `pd edit` / `pri` / `due` / `mv` / `note` | change one field |
-| `pd list` | `--all`, `--sort priority\|due\|created\|alpha`, `-p` |
+| `pd list` | `-a/--all`, `--sort priority\|due\|created\|alpha`, `-p` |
 | `pd all` / `pd files` | across every known list |
 | `pd log [id]` | the ledger |
 | `pd compact` | archive the log, keep the state |
