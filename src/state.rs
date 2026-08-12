@@ -1,6 +1,6 @@
 //! Derived state. The log is the truth; everything here is replayed from it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +49,32 @@ pub struct State {
     pub torn_lines: usize,
 }
 
+/// Would giving `child` the parent `new_parent` close a loop?
+///
+/// Answered by walking up from `new_parent`; if `child` is already somewhere above it,
+/// the link would point the tree back into itself. The visited set is what makes this
+/// safe to call while replaying a log that may *already* contain a cycle.
+fn closes_cycle(tasks: &[Task], child: &str, new_parent: &str) -> bool {
+    if child == new_parent {
+        return true;
+    }
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut cur = Some(new_parent);
+    while let Some(id) = cur {
+        if id == child {
+            return true;
+        }
+        if !seen.insert(id) {
+            return true; // already looping; refuse to add to it
+        }
+        cur = tasks
+            .iter()
+            .find(|t| t.id == id)
+            .and_then(|t| t.parent.as_deref());
+    }
+    false
+}
+
 impl State {
     pub fn replay(events: &[Event]) -> State {
         let mut tasks: Vec<Task> = Vec::new();
@@ -68,13 +94,20 @@ impl State {
             }
 
             if e.ev == Kind::Created {
+                // A parent that would close a loop is dropped, not obeyed. Keeping the
+                // task at the root costs a level of nesting; honouring the cycle costs
+                // every later tree walk.
+                let parent = match &e.data.parent {
+                    Some(p) if closes_cycle(&tasks, &e.id, p) => None,
+                    other => other.clone(),
+                };
                 tasks.push(Task {
                     id: e.id.clone(),
                     text: e.data.text.clone().unwrap_or_default(),
                     state: TaskState::Open,
                     priority: e.data.priority,
                     due: e.data.due.clone(),
-                    parent: e.data.parent.clone(),
+                    parent,
                     created_at: e.ts.clone(),
                     completed_at: None,
                     order: next_order,
@@ -82,6 +115,19 @@ impl State {
                 next_order += 1;
                 continue;
             }
+
+            // Resolved before the mutable borrow below, since it has to read the rest of
+            // the tree. `None` here means "leave the parent alone".
+            let move_to = if e.ev == Kind::Moved {
+                let to = e.data.to_parent.as_ref().and_then(|v| v.as_str());
+                match to {
+                    Some(p) if closes_cycle(&tasks, &e.id, p) => None,
+                    Some(p) => Some(Some(p.to_string())),
+                    None => Some(None),
+                }
+            } else {
+                None
+            };
 
             let Some(t) = tasks.iter_mut().find(|t| t.id == e.id) else {
                 // An event for a task we never saw created. Skip rather than invent one.
@@ -118,12 +164,9 @@ impl State {
                         .map(|s| s.to_string());
                 }
                 Kind::Moved => {
-                    t.parent = e
-                        .data
-                        .to_parent
-                        .as_ref()
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
+                    if let Some(p) = move_to {
+                        t.parent = p;
+                    }
                 }
                 Kind::Noted => {}
                 Kind::Created | Kind::Compacted => unreachable!("handled above"),
@@ -176,18 +219,26 @@ impl State {
     }
 
     /// Every descendant of `id`, at any depth, in insertion order.
+    ///
+    /// Replay guarantees an acyclic tree, so the visited set is belt-and-braces rather
+    /// than load-bearing — but it is what turns "we believe this terminates" into "this
+    /// terminates", and the cost is one hash per task.
     pub fn descendants(&self, id: &str) -> Vec<&Task> {
         let mut out = Vec::new();
-        let mut frontier = vec![id.to_string()];
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut frontier = vec![id];
         while let Some(cur) = frontier.pop() {
+            if !seen.insert(cur) {
+                continue;
+            }
             let mut kids: Vec<&Task> = self
                 .tasks
                 .iter()
-                .filter(|t| t.parent.as_deref() == Some(cur.as_str()))
+                .filter(|t| t.parent.as_deref() == Some(cur))
                 .collect();
             kids.sort_by_key(|t| t.order);
             for k in kids {
-                frontier.push(k.id.clone());
+                frontier.push(&k.id);
                 out.push(k);
             }
         }
@@ -198,13 +249,14 @@ impl State {
     /// Depth of a task in the tree, counting from 1.
     pub fn depth(&self, id: &str) -> usize {
         let mut depth = 1;
-        let mut cur = self.get(id).and_then(|t| t.parent.clone());
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut cur = self.get(id).and_then(|t| t.parent.as_deref());
         while let Some(p) = cur {
-            depth += 1;
-            if depth > MAX_DEPTH * 4 {
-                break; // cycle guard; shouldn't happen, but never hang
+            if !seen.insert(p) {
+                break;
             }
-            cur = self.get(&p).and_then(|t| t.parent.clone());
+            depth += 1;
+            cur = self.get(p).and_then(|t| t.parent.as_deref());
         }
         depth
     }
@@ -405,5 +457,56 @@ mod tests {
         assert_eq!(s.depth("ccc"), 3);
         assert!(s.would_cycle("aaa", "ccc"));
         assert!(!s.would_cycle("ccc", "aaa"));
+    }
+
+    /// A `moved` that points a task under its own descendant. Before the guard this
+    /// replayed into a loop, and every later tree walk spun on it.
+    #[test]
+    fn a_move_that_would_close_a_loop_is_refused_at_replay() {
+        let log = vec![
+            created(1, "aaa", "A", None),
+            created(2, "bbb", "B", Some("aaa")),
+            ev(3, Kind::Moved, "aaa").with_data(Data {
+                to_parent: Some(json!("bbb")),
+                ..Default::default()
+            }),
+        ];
+        let s = State::replay(&log);
+
+        assert_eq!(s.get("aaa").unwrap().parent, None, "the move was dropped");
+        assert_eq!(s.get("bbb").unwrap().parent.as_deref(), Some("aaa"));
+        // The real symptom: these three used to never return.
+        assert_eq!(s.descendants("aaa").len(), 1);
+        assert_eq!(s.depth("bbb"), 2);
+        assert_eq!(s.paths().path_of("bbb"), Some("1.1"));
+        assert_eq!(s.open_roots().len(), 1, "both tasks stay reachable");
+    }
+
+    /// The variant the `moved` guard alone would miss: two `created` events naming each
+    /// other, which needs no `moved` at all.
+    #[test]
+    fn two_creates_naming_each_other_do_not_form_a_loop() {
+        let log = vec![
+            created(1, "aaa", "A", Some("bbb")),
+            created(2, "bbb", "B", Some("aaa")),
+        ];
+        let s = State::replay(&log);
+
+        // "aaa" named a parent that did not exist yet, so it kept it; "bbb" would have
+        // closed the loop, so its parent was dropped.
+        assert_eq!(s.get("bbb").unwrap().parent, None);
+        assert_eq!(s.descendants("bbb").len(), 1);
+        assert_eq!(s.tasks.len(), 2, "neither task was lost");
+        assert!(!s.paths().by_id.is_empty(), "both remain addressable");
+    }
+
+    /// A task pointing at a parent that never existed is not a cycle — it must keep
+    /// surfacing at the root rather than being swallowed.
+    #[test]
+    fn a_dangling_parent_leaves_the_task_reachable() {
+        let log = vec![created(1, "aaa", "A", Some("nope"))];
+        let s = State::replay(&log);
+        assert_eq!(s.open_roots().len(), 1);
+        assert_eq!(s.depth("aaa"), 2, "depth counts the missing link");
     }
 }
