@@ -27,6 +27,12 @@ $ pd log a7f
 
 ## Install
 
+**Homebrew**, on macOS or Linux:
+
+```sh
+brew install aram-p/tap/podrick
+```
+
 **A prebuilt binary**, no toolchain required — macOS and Linux, arm64 and x86-64:
 
 ```sh
@@ -53,7 +59,8 @@ command -v pd || export PATH="$HOME/.cargo/bin:$PATH"   # and add it to your she
 pd --version
 ```
 
-Not on crates.io or Homebrew yet.
+Not on crates.io or in homebrew-core yet — core wants a project with rather more stars
+than this one has.
 
 ## Use
 
