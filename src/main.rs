@@ -410,25 +410,27 @@ fn maybe_gitignore(ctx: &Ctx, task_file: &Path) -> Result<()> {
     let Some(root) = store::git_root(dir) else {
         return Ok(());
     };
+    // The glob, not the bare name: the lock and the archive sit beside the log and would
+    // otherwise show up in `git status` forever.
+    let pattern = format!("{}*", store::FILE_NAME);
     let gitignore = root.join(".gitignore");
     let existing = std::fs::read_to_string(&gitignore).unwrap_or_default();
-    if existing.lines().any(|l| l.trim() == store::FILE_NAME) {
+    if existing
+        .lines()
+        .any(|l| matches!(l.trim(), x if x == pattern || x == store::FILE_NAME))
+    {
         return Ok(());
     }
-    if !confirm(&format!("Add {} to .gitignore?", store::FILE_NAME))? {
+    if !confirm(&format!("Add {pattern} to .gitignore?"))? {
         return Ok(());
     }
     let mut out = existing;
     if !out.is_empty() && !out.ends_with('\n') {
         out.push('\n');
     }
-    out.push_str(&format!("{}\n", store::FILE_NAME));
+    out.push_str(&format!("{pattern}\n"));
     std::fs::write(&gitignore, out)?;
-    ctx.note(&format!(
-        "added {} to {}",
-        store::FILE_NAME,
-        gitignore.display()
-    ));
+    ctx.note(&format!("added {pattern} to {}", gitignore.display()));
     Ok(())
 }
 

@@ -4,7 +4,9 @@ A task tracker for the terminal, designed so that agents are the primary caller 
 humans are the comfortable secondary. Binary: `pd`. Crate: `podrick`. Rust, MIT,
 public repo `aram-p/podrick`.
 
-Status: awaiting approval. No code written yet.
+Status: built. This document is the design record — it describes what was agreed and why,
+including what was deliberately left out. Where it and the code disagree, the code is
+right and this is a bug.
 
 ---
 
