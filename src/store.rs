@@ -131,29 +131,53 @@ impl Registry {
         Ok(data_dir()?.join("registry.jsonl"))
     }
 
-    pub fn load() -> Result<Registry> {
-        let f = Self::file()?;
-        let Ok(contents) = fs::read_to_string(&f) else {
-            return Ok(Registry::default());
+    /// Entries whose file is gone are pruned silently; lines that will not parse are
+    /// skipped rather than failing the whole registry.
+    fn read(f: &Path) -> Vec<RegEntry> {
+        let Ok(contents) = fs::read_to_string(f) else {
+            return Vec::new();
         };
-        let mut entries: Vec<RegEntry> = contents
+        contents
             .lines()
             .filter(|l| !l.trim().is_empty())
-            .filter_map(|l| serde_json::from_str(l).ok())
-            .collect();
-        // Entries whose file is gone are pruned silently.
-        entries.retain(|e| e.path.exists());
-        Ok(Registry { entries })
+            .filter_map(|l| serde_json::from_str::<RegEntry>(l).ok())
+            .filter(|e| e.path.exists())
+            .collect()
     }
 
+    pub fn load() -> Result<Registry> {
+        Ok(Registry {
+            entries: Self::read(&Self::file()?),
+        })
+    }
+
+    /// Every `pd` saves the registry — even a bare `pd list`, which refreshes
+    /// `last_used` — so two of them doing it at once is routine rather than exotic.
+    ///
+    /// Two things make that safe. The lock plus the temp-file rename mean a reader never
+    /// sees a half-written file. The re-read *inside* the lock is the more important
+    /// half: `self` was loaded before whatever the other process has since registered,
+    /// and writing it back verbatim would silently drop that entry. This registry is
+    /// authoritative only for the paths it knows about.
     pub fn save(&self) -> Result<()> {
         let f = Self::file()?;
+        let _lock = Lock::at(&f.with_extension("lock"))?;
+
+        let mut entries = self.entries.clone();
+        for e in Self::read(&f) {
+            if !entries.iter().any(|k| k.path == e.path) {
+                entries.push(e);
+            }
+        }
+
         let mut out = String::new();
-        for e in &self.entries {
+        for e in &entries {
             out.push_str(&serde_json::to_string(e).map_err(|e| AppError::io(e.to_string()))?);
             out.push('\n');
         }
-        fs::write(f, out)?;
+        let tmp = f.with_extension("jsonl.tmp");
+        fs::write(&tmp, out)?;
+        fs::rename(&tmp, &f)?;
         Ok(())
     }
 
@@ -407,8 +431,7 @@ pub fn load(path: &Path) -> Result<Store> {
         Err(e) => return Err(e.into()),
     };
     let (events, torn) = event::parse_log(&contents);
-    let mut state = State::replay(&events);
-    state.torn_lines = torn;
+    let state = State::replay(&events);
     Ok(Store {
         path: path.to_path_buf(),
         state,
@@ -428,27 +451,40 @@ pub fn read_events(path: &Path) -> Result<Vec<Event>> {
 
 /// An advisory lock held for the duration of a write. A torn ledger is the one failure
 /// this tool cannot recover from, so every write pays for this.
+///
+/// `held` is not decoration: after `LOCK_TIMEOUT_SECS` the lock is broken and the write
+/// goes ahead anyway, so a `Lock` value can legitimately exist without holding anything.
+/// Recording that beats a type whose name quietly stops being true.
 pub struct Lock {
     file: File,
-    path: PathBuf,
+    held: bool,
 }
 
 impl Lock {
+    /// Lock the directory containing `target`.
     pub fn acquire(target: &Path) -> Result<Lock> {
         let dir = target.parent().unwrap_or(Path::new("."));
         fs::create_dir_all(dir)?;
-        let path = dir.join(LOCK_NAME);
+        Lock::at(&dir.join(LOCK_NAME))
+    }
+
+    /// Lock one specific lock file. Used where the thing being guarded is not a ledger —
+    /// the registry, which several concurrent `pd` processes rewrite wholesale.
+    pub fn at(path: &Path) -> Result<Lock> {
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)?;
+        }
         let file = OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(false)
-            .open(&path)?;
+            .open(path)?;
 
         let deadline =
             std::time::Instant::now() + std::time::Duration::from_secs(LOCK_TIMEOUT_SECS);
         loop {
             match file.try_lock_exclusive() {
-                Ok(()) => return Ok(Lock { file, path }),
+                Ok(()) => return Ok(Lock { file, held: true }),
                 Err(_) if std::time::Instant::now() < deadline => {
                     std::thread::sleep(std::time::Duration::from_millis(25));
                 }
@@ -458,17 +494,20 @@ impl Lock {
                         "podrick: lock at {} held for over {LOCK_TIMEOUT_SECS}s; proceeding anyway",
                         path.display()
                     );
-                    return Ok(Lock { file, path });
+                    return Ok(Lock { file, held: false });
                 }
             }
         }
     }
 }
 
+// The lock file itself is never unlinked: another process may already have it open, and
+// removing it would hand two of them locks on different inodes.
 impl Drop for Lock {
     fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.file);
-        let _ = self.path.metadata(); // keep the file; unlinking races other holders
+        if self.held {
+            let _ = FileExt::unlock(&self.file);
+        }
     }
 }
 

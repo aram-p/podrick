@@ -31,10 +31,6 @@ use store::{How, Registry, ResolveOpts, Resolved, Store};
 
 const NUDGE_MICROS: u128 = 50_000;
 
-/// Flags that consume the argument after them, so argv normalisation can skip their
-/// values rather than mistaking one for a subcommand.
-const VALUE_FLAGS: [&str; 4] = ["-f", "--file", "--expect-seq", "--now"];
-
 /// `pd fix the thing` has to mean "search for it", and `pd -a` has to mean "list
 /// everything", but clap needs a subcommand to attach either to. When no known command is
 /// present, insert an explicit `list` immediately after argv[0].
@@ -46,10 +42,22 @@ fn normalize_args(raw: Vec<String>) -> Vec<String> {
     if raw.len() < 2 {
         return raw;
     }
-    let known: Vec<String> = Cli::command()
+    let cmd = Cli::command();
+    let known: Vec<String> = cmd
         .get_subcommands()
         .map(|s| s.get_name().to_string())
         .collect();
+    // Flags that consume the argument after them, so the scan below skips their values
+    // rather than mistaking one for a subcommand. Asked of clap rather than hand-listed:
+    // a hand-listed copy goes stale the first time someone adds a global flag.
+    let mut value_flags: Vec<String> = Vec::new();
+    for a in cmd
+        .get_arguments()
+        .filter(|a| a.get_num_args().is_some_and(|n| n.takes_values()))
+    {
+        value_flags.extend(a.get_long().map(|l| format!("--{l}")));
+        value_flags.extend(a.get_short().map(|c| format!("-{c}")));
+    }
 
     let mut i = 1;
     while i < raw.len() {
@@ -63,7 +71,7 @@ fn normalize_args(raw: Vec<String>) -> Vec<String> {
             if matches!(a.as_str(), "-h" | "--help" | "-V" | "--version") {
                 return raw;
             }
-            if VALUE_FLAGS.contains(&a.as_str()) {
+            if value_flags.iter().any(|f| f == a) {
                 i += 1;
             }
             i += 1;
@@ -505,20 +513,24 @@ fn task_json(t: &Task, path: Option<&str>) -> Value {
     })
 }
 
-fn envelope(open: &Open, extra: Value) -> Value {
-    envelope_at(&open.resolved.path, open.store.state.last_seq, extra)
+fn envelope<const N: usize>(open: &Open, fields: [(&str, Value); N]) -> Value {
+    envelope_at(&open.resolved.path, open.store.state.last_seq, fields)
 }
 
 /// Every payload carries the resolved file and the log sequence it reflects, so a caller
 /// can pass that seq straight back as `--expect-seq`.
-fn envelope_at(path: &Path, seq: u64, extra: Value) -> Value {
-    let mut v = json!({ "file": path, "seq": seq });
-    if let (Some(map), Some(extra)) = (v.as_object_mut(), extra.as_object()) {
-        for (k, val) in extra {
-            map.insert(k.clone(), val.clone());
-        }
+///
+/// Fields arrive as pairs rather than as a `json!` object because the envelope has to
+/// merge them into its own map: taking a `Value` meant a payload that was not an object
+/// silently vanished, and there is no shape of that mistake worth tolerating.
+fn envelope_at<const N: usize>(path: &Path, seq: u64, fields: [(&str, Value); N]) -> Value {
+    let mut map = serde_json::Map::with_capacity(N + 2);
+    map.insert("file".into(), json!(path));
+    map.insert("seq".into(), json!(seq));
+    for (k, v) in fields {
+        map.insert(k.to_string(), v);
     }
-    v
+    Value::Object(map)
 }
 
 fn command_schema() -> Value {
@@ -629,7 +641,7 @@ fn cmd_list(
             .filter_map(|r| open.store.state.get(&r.id))
             .map(|t| task_json(t, paths.path_of(&t.id)))
             .collect();
-        ctx.emit(envelope(&open, json!({ "tasks": tasks })));
+        ctx.emit(envelope(&open, [("tasks", json!(tasks))]));
         return Ok(());
     }
 
@@ -736,7 +748,7 @@ fn cmd_add(
         ctx.emit(envelope_at(
             &open.resolved.path,
             after.state.last_seq,
-            json!({ "task": task_json(task, paths.path_of(&id)) }),
+            [("task", task_json(task, paths.path_of(&id)))],
         ));
     } else {
         let path = paths.path_of(&id).unwrap_or("-");
@@ -819,7 +831,6 @@ fn cmd_close(
             .in_batch(primary_seq)
             .with_note(message.clone()),
     );
-    let cascaded = cascade_targets;
 
     store::append(&open.resolved.path, &events)?;
 
@@ -840,15 +851,19 @@ fn cmd_close(
         ctx.emit(envelope_at(
             &open.resolved.path,
             after.state.last_seq,
-            json!({ "task": t, "cascaded": cascaded, "action": verb }),
+            [
+                ("task", t),
+                ("cascaded", json!(cascade_targets)),
+                ("action", json!(verb)),
+            ],
         ));
     } else {
         println!("{verb}  {}", task.text);
-        if !cascaded.is_empty() {
+        if !cascade_targets.is_empty() {
             println!(
                 "{}",
                 ctx.style
-                    .dim(&format!("       and {} subtask(s)", cascaded.len()))
+                    .dim(&format!("       and {} subtask(s)", cascade_targets.len()))
             );
         }
     }
@@ -911,12 +926,12 @@ fn cmd_undo(cli: &Cli, ctx: &Ctx) -> Result<()> {
         ctx.emit(envelope_at(
             &open.resolved.path,
             after.state.last_seq,
-            json!({
-                "undone": format!("{:?}", orig.ev).to_lowercase(),
-                "undo_of": orig.seq,
-                "events_reverted": reverted,
-                "task": t,
-            }),
+            [
+                ("undone", json!(format!("{:?}", orig.ev).to_lowercase())),
+                ("undo_of", json!(orig.seq)),
+                ("events_reverted", json!(reverted)),
+                ("task", json!(t)),
+            ],
         ));
     } else {
         let what = after
@@ -977,7 +992,7 @@ fn mutate(
         ctx.emit(envelope_at(
             &open.resolved.path,
             after.state.last_seq,
-            json!({ "task": t }),
+            [("task", t)],
         ));
     } else {
         println!("{human}");
@@ -1108,7 +1123,7 @@ fn cmd_mv(cli: &Cli, ctx: &Ctx, target: &str, under: Option<&str>, top: bool) ->
         ctx.emit(envelope_at(
             &open.resolved.path,
             after.state.last_seq,
-            json!({ "task": t }),
+            [("task", t)],
         ));
     } else {
         println!(
@@ -1150,7 +1165,7 @@ fn cmd_note(cli: &Cli, ctx: &Ctx, target: &str, message: &str) -> Result<()> {
         ctx.emit(envelope_at(
             &open.resolved.path,
             after.state.last_seq,
-            json!({ "task": t, "note": message }),
+            [("task", t), ("note", json!(message))],
         ));
     } else {
         println!("noted  {}", task.text);
@@ -1173,7 +1188,7 @@ fn cmd_log(cli: &Cli, ctx: &Ctx, target: Option<&str>, limit: usize) -> Result<(
     let shown: Vec<&Event> = filtered.iter().rev().take(limit).rev().copied().collect();
 
     if ctx.json {
-        ctx.emit(envelope(&open, json!({ "events": shown })));
+        ctx.emit(envelope(&open, [("events", json!(shown))]));
         return Ok(());
     }
 

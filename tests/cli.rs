@@ -39,8 +39,20 @@ impl Sandbox {
         }
     }
 
-    fn pd(&self) -> Command {
-        let mut c = Command::cargo_bin("pd").expect("binary");
+    /// Likewise for `dirs::data_dir()`, which on macOS shares that same directory.
+    fn data_dir(&self) -> std::path::PathBuf {
+        if cfg!(target_os = "macos") {
+            self.path().join("Library/Application Support/podrick")
+        } else {
+            self.path().join("data/podrick")
+        }
+    }
+
+    /// The sandboxed environment every invocation needs. Tests that need to `spawn`
+    /// several at once take this; everything else takes [`Sandbox::pd`]. Neither builds
+    /// the environment by hand — an omitted `XDG_*` silently escapes the sandbox.
+    fn cmd(&self) -> std::process::Command {
+        let mut c = std::process::Command::new(assert_cmd::cargo::cargo_bin("pd"));
         c.current_dir(self.dir.path())
             .env("HOME", self.dir.path())
             .env("XDG_DATA_HOME", self.dir.path().join("data"))
@@ -48,6 +60,10 @@ impl Sandbox {
             .env("PODRICK_NOW", "2026-08-12T14:30:00+04:00")
             .env_remove("NO_COLOR");
         c
+    }
+
+    fn pd(&self) -> Command {
+        Command::from_std(self.cmd())
     }
 
     /// Run and parse the JSON payload, asserting success.
@@ -639,11 +655,9 @@ fn the_file_is_found_by_walking_up_from_a_subdirectory() {
     let sub = s.path().join("deep/nested");
     std::fs::create_dir_all(&sub).unwrap();
 
-    let out = Command::cargo_bin("pd")
-        .unwrap()
+    let out = s
+        .pd()
         .current_dir(&sub)
-        .env("HOME", s.path())
-        .env("PODRICK_NOW", "2026-08-12T14:30:00+04:00")
         .args(["list", "--json"])
         .output()
         .unwrap();
@@ -675,11 +689,8 @@ fn concurrent_writers_produce_a_well_formed_log() {
 
     let mut kids = Vec::new();
     for i in 0..8 {
-        let mut c = std::process::Command::new(assert_cmd::cargo::cargo_bin("pd"));
-        c.current_dir(s.path())
-            .env("HOME", s.path())
-            .env("PODRICK_NOW", "2026-08-12T14:30:00+04:00")
-            .args(["add", &format!("task {i}")])
+        let mut c = s.cmd();
+        c.args(["add", &format!("task {i}")])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
         kids.push(c.spawn().expect("spawn"));
@@ -694,6 +705,53 @@ fn concurrent_writers_produce_a_well_formed_log() {
     for l in &lines {
         serde_json::from_str::<Value>(l).expect("no torn lines under concurrency");
     }
+}
+
+/// The ledger has always been locked. The registry was not, and every `pd` rewrites it
+/// wholesale — even a bare `pd list`, which refreshes `last_used`. Eight processes each
+/// registering a different file is a plain lost-update race: each loads, adds its own
+/// entry, and writes the whole file back over everyone else's.
+#[test]
+fn concurrent_writers_cannot_lose_a_registry_entry() {
+    let s = Sandbox::new();
+
+    // Each needs its own repo: `--here` means "this project", and inside one repo every
+    // subdirectory resolves to the same file at its root.
+    let names: Vec<String> = (0..8).map(|i| format!("p{i}")).collect();
+    for name in &names {
+        let dir = s.path().join(name);
+        std::fs::create_dir(&dir).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&dir)
+            .status()
+            .expect("git init");
+    }
+
+    let mut kids = Vec::new();
+    for name in &names {
+        let mut c = s.cmd();
+        c.current_dir(s.path().join(name))
+            .args(["--here", "add", name])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        kids.push(c.spawn().expect("spawn"));
+    }
+    for mut k in kids {
+        k.wait().expect("wait");
+    }
+
+    let contents =
+        std::fs::read_to_string(s.data_dir().join("registry.jsonl")).expect("registry exists");
+    let lines: Vec<&str> = contents.lines().filter(|l| !l.trim().is_empty()).collect();
+    for l in &lines {
+        serde_json::from_str::<Value>(l).expect("no torn lines under concurrency");
+    }
+    assert_eq!(lines.len(), names.len(), "no registration lost: {contents}");
+
+    // And `pd files` agrees, which is the way a user would notice.
+    let listed = s.json(&["files", "--json"]);
+    assert_eq!(listed["files"].as_array().unwrap().len(), names.len());
 }
 
 /// Discovery is helpful but it is also surprising, so it announces itself — but only when

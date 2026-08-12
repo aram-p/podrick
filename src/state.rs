@@ -45,8 +45,6 @@ pub struct State {
     /// Insertion order, always.
     pub tasks: Vec<Task>,
     pub last_seq: u64,
-    /// Lines that failed to parse during replay.
-    pub torn_lines: usize,
 }
 
 /// Would giving `child` the parent `new_parent` close a loop?
@@ -173,11 +171,7 @@ impl State {
             }
         }
 
-        State {
-            tasks,
-            last_seq,
-            torn_lines: 0,
-        }
+        State { tasks, last_seq }
     }
 
     pub fn get(&self, id: &str) -> Option<&Task> {
