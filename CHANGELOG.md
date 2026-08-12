@@ -8,10 +8,18 @@ Changes to the three versioned contracts — JSON payloads, exit codes, and the 
 are always listed under their own heading, because those are the ones that can break a
 caller. A log written by any older `pd` must always still replay.
 
-## Unreleased
+## 0.1.2
 
 ### Fixed
 
+- **A value-taking global flag swallowed the command after it.** `pd --file x add hi`
+  searched for `"add hi"` and added nothing. Argv normalisation asks clap which flags
+  consume the argument after them so its scan can skip their values — but it asked an
+  unbuilt `Command`, and clap fills `num_args` in from each argument's action during the
+  build, leaving it `None` before that. The answer came back "nothing takes a value", so
+  `--file`'s value looked like the subcommand position and an implied `list` went in ahead
+  of the real command. Affects `--file`/`-f`, `--now` and `--expect-seq`, and turned a
+  write into a silent no-op read rather than an error.
 - **The list ignored the width of the terminal.** The layout was a fixed 81 columns —
   a 58-wide text column plus 23 of chrome — so anything narrower wrapped the ids onto
   their own lines, and a title longer than 58 pushed its id rightwards until the ids
