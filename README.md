@@ -1,0 +1,102 @@
+# podrick
+
+A terminal task tracker with a perfect memory, built for agents first.
+
+```
+  ▏ ○ fix the flaky test         in 2d      qdb
+      ○ pin the seed                        zu7
+      ○ check CI on the runner              nn3
+
+  ▏ ○ write the release notes    in 18h     ffu
+    ○ ship the migration         3d ago     hwx
+    ○ rewrite the intro                     e4y
+
+  6 open · 1 done
+```
+
+Every change appends to an append-only ledger, so nothing is ever lost and any task's
+full history can be replayed — including the notes you left when you closed it.
+
+```console
+$ pd log a7f
+   1 created        fix the flaky test    · you · 3d ago
+  11 completed      fix the flaky test    · you · 2d ago
+       "finally green"
+  12 uncompleted    fix the flaky test    · agent · 1d ago
+```
+
+## Install
+
+```sh
+cargo install podrick          # crates.io
+brew install aram-p/tap/podrick
+```
+
+The binary is `pd`.
+
+## Use
+
+```sh
+pd add fix the flaky test -p1 -d fri   # quotes optional; dates in plain language
+pd                                     # the list
+pd done 2 -m "pinned the seed"         # notes are optional, and permanent
+pd undo                                # revert the last action, whatever it was
+pd flaky                               # substring search
+```
+
+Tasks live in a `.podrick` file at the root of whatever git repo you are in, so each
+project has its own list. `-g` uses a global one. `pd all` shows every list at once.
+
+| | |
+| --- | --- |
+| `pd add <text>` | `-p p1..p4`, `-d <when>`, `--under <path\|id>` |
+| `pd done` / `reopen` / `drop` | `-m <note>` on any of them |
+| `pd undo` | reverts the last action, cascades included |
+| `pd edit` / `pri` / `due` / `mv` / `note` | change one field |
+| `pd list` | `--all`, `--sort priority\|due\|created\|alpha`, `-p` |
+| `pd all` / `pd files` | across every known list |
+| `pd log [id]` | the ledger |
+| `pd compact` | archive the log, keep the state |
+| `pd config sort due [--here]` | global, or this project only |
+
+Dates are ordinary English: `fri`, `tomorrow 9am`, `next tue`, `in 3 days`, `dec 25`,
+`2026-12-25 15:00`. A weekday means *today* if today is that weekday, and a bare time
+that has already passed means tomorrow. There is no recurrence, on purpose.
+
+## For agents
+
+`pd` is designed to be driven by a script or an agent, so it behaves itself:
+
+- **`--json` on every command**, including writes — `pd add --json` returns the new
+  task's id, so there is no need to re-list to find it.
+- **`pd --help --json`** emits a machine-readable schema of the entire command surface in
+  one call. Start there.
+- **Data on stdout, everything else on stderr.** `pd list --json | jq` is never polluted.
+- **Exit codes**: `0` ok · `1` not found · `2` usage · `3` conflict · `4` I/O.
+- **No prompt ever fires without a TTY.** Where a human would be asked to confirm, a
+  script gets an error naming the flag that would have said yes.
+- **`id` is permanent, `path` is positional.** `2.1` is convenient to type but shifts
+  whenever the tree changes, so a path-addressed write from a non-interactive caller is
+  refused unless it passes `--expect-seq <n>` matching the seq it last read. Address
+  tasks by `id` and this never comes up.
+
+## Storage
+
+One file, `.podrick`, holding one JSON event per line:
+
+```json
+{"v":1,"seq":11,"ts":"2026-08-12T14:03:11+04:00","actor":"cli","ev":"completed","id":"a7f","note":"finally green","batch":11}
+```
+
+State is replayed from the log on every command, which takes well under a millisecond for
+any realistic list. Nothing is ever rewritten or deleted — `pd compact` is the only
+command that shortens the file, it never runs on its own, and it moves the old log to
+`.podrick.archive` rather than dropping it.
+
+The file is not meant to be hand-edited; use the commands, and the ledger stays honest.
+
+Full design rationale, including what was deliberately left out, is in [SPEC.md](SPEC.md).
+
+## License
+
+MIT
