@@ -539,6 +539,67 @@ fn concurrent_writers_produce_a_well_formed_log() {
     }
 }
 
+/// Discovery is helpful but it is also surprising, so it announces itself — but only when
+/// it matters. A read that lands on an adopted file changes nothing; a write to one you
+/// did not expect is the whole reason the notice exists.
+#[test]
+fn an_adopted_file_is_announced_on_writes_and_kept_quiet_on_reads() {
+    let s = Sandbox::new();
+    let proj = s.path().join("proj");
+    std::fs::create_dir(&proj).unwrap();
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&proj)
+        .status()
+        .expect("git init");
+
+    // Register a file that lives one level down, then act from the parent, where walking
+    // up finds nothing and only the registry can help.
+    let id = {
+        let out = s
+            .pd()
+            .current_dir(&proj)
+            .args(["--here", "add", "write the parser", "--json"])
+            .output()
+            .expect("run pd");
+        assert!(out.status.success());
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        v["task"]["id"].as_str().unwrap().to_string()
+    };
+    assert!(proj.join(".podrick").exists(), "file landed in proj/");
+
+    let stderr = |args: &[&str]| -> String {
+        let out = s.pd().args(args).output().expect("run pd");
+        assert!(
+            out.status.success(),
+            "`pd {}` failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stderr).to_string()
+    };
+
+    let read = stderr(&["list"]);
+    assert!(
+        !read.contains("same directory tree"),
+        "a read must not narrate discovery: {read:?}"
+    );
+
+    let write = stderr(&["note", &id, "-m", "still here"]);
+    assert!(
+        write.contains("same directory tree"),
+        "a write must say where it landed: {write:?}"
+    );
+    assert!(
+        write.contains("proj"),
+        "the notice names the project it adopted: {write:?}"
+    );
+    assert!(
+        !write.contains(".podrick"),
+        "the notice shows the project, not the dotfile: {write:?}"
+    );
+}
+
 fn order(v: &Value) -> Vec<String> {
     v["tasks"]
         .as_array()

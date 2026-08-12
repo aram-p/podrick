@@ -1,4 +1,4 @@
-# podrick — v1 spec
+# podrick — 0.1 spec
 
 A task tracker for the terminal, designed so that agents are the primary caller and
 humans are the comfortable secondary. Binary: `pd`. Crate: `podrick`. Rust, MIT,
@@ -189,11 +189,11 @@ and the hidden `--now <iso>` (see §9).
 Quoting is optional — trailing positionals are joined. `--` ends flag parsing.
 `-m` notes take a quoted string.
 
-**Cut from v1, deliberately**: the interruption stack (`push`/`pop`) — it serves only the
+**Cut from 0.1, deliberately**: the interruption stack (`push`/`pop`) — it serves only the
 human 10% and carries its own global state; revisit with the TUI. Recurrence — 40% of the
 date complexity for 5% of tasks, and it's the thing Todoist does better because it has a
 server. Tags and projects — the substring search covers them at zero data-model cost.
-`pd init` — first `pd add` does everything it would have. The TUI itself — v2.
+`pd init` — first `pd add` does everything it would have. The TUI itself — later.
 
 ---
 
@@ -218,8 +218,9 @@ arguments prints the resolved chain, so the ordering is never a mystery.
 `--json` is available on **every** command, including writes — `pd add --json` returns the
 created task's id, so an agent never has to re-list to find what it just made.
 
-**The JSON shape is a stable API from v1.** Every payload carries `file` (the resolved
-path) and, on error, `error` and `hint`.
+**The JSON shape is treated as an API.** Every payload carries `file` (the resolved path)
+and, on error, `error` and `hint`. While the version is `0.x` it may still change, but only
+on a minor bump and only with a note in the changelog — see §13.
 
 `pd --help --json` emits a machine-readable schema of the entire command surface —
 every command, flag, argument, and return shape in one call. This is the bet that a
@@ -313,8 +314,37 @@ Shell completions (`pd completions <shell>`) for zsh, bash, and fish, generated 
 
 ---
 
-## 12. v2 backlog
+## 12. After 0.1
 
-TUI (full editing, since the CLI is the only editor in v1) · the interruption stack ·
+TUI (full editing, since the CLI is the only editor in 0.1) · the interruption stack ·
 recurrence, if it's ever genuinely missed · optional MCP wrapper over the stable JSON
 contract.
+
+---
+
+## 13. Versioning
+
+[Semantic versioning](https://semver.org). **The version is `0.x` and stays there until the
+tool has been lived with long enough to know what is actually stable** — nothing here has
+been used in anger yet, and promising a 1.0 surface before that is a promise made on
+guesses.
+
+While `0.x`, semver's rule is that the **minor** position carries breaking changes and the
+**patch** position carries everything else:
+
+| Change | Bump | Example |
+| --- | --- | --- |
+| Breaking: a JSON field or exit code changes meaning, a flag is removed, an old log stops replaying | minor | `0.1.4 → 0.2.0` |
+| New command, new flag, new JSON field | patch | `0.1.0 → 0.1.1` |
+| Fix, docs, internals | patch | `0.1.0 → 0.1.1` |
+
+Three surfaces are versioned contracts and their changes are always called out in the
+changelog: the **JSON payloads**, the **exit codes** (§9), and the **log format** — where
+the rule is stricter than semver, since a ledger outlives the binary that wrote it. **Any
+`pd` must replay any log ever written by an older `pd`.** That is what the `v` field on
+every event is for; a format change adds `v: 2` and a reader for it, and never drops the
+reader for `v: 1`.
+
+1.0 is the moment those three stop moving, not a measure of how finished the feature set
+is. Releases are cut by pushing a `vX.Y.Z` tag, which builds the four target binaries and
+publishes to crates.io.

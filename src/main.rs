@@ -155,8 +155,15 @@ impl Ctx {
     }
 
     /// Chatter. Always stderr, so stdout stays a clean data channel.
+    ///
+    /// A terminal gets a quiet marker that sits under the tree without competing with it;
+    /// everything else keeps the greppable `pd:` prefix that scripts may already match on.
     fn note(&self, msg: &str) {
-        eprintln!("pd: {msg}");
+        if self.style.color {
+            eprintln!("  {} {}", self.style.accent("↳"), self.style.dim(msg));
+        } else {
+            eprintln!("pd: {msg}");
+        }
     }
 
     fn emit(&self, value: Value) {
@@ -167,6 +174,28 @@ impl Ctx {
 // ---------------------------------------------------------------------------
 // Dispatch
 // ---------------------------------------------------------------------------
+
+impl Cmd {
+    /// Whether this command appends to the ledger. Adoption of a file found through
+    /// discovery is announced only for these — knowing *where* a write landed matters,
+    /// whereas repeating it on every bare `pd` is just noise.
+    fn mutates(&self) -> bool {
+        matches!(
+            self,
+            Cmd::Add { .. }
+                | Cmd::Done { .. }
+                | Cmd::Reopen { .. }
+                | Cmd::Drop { .. }
+                | Cmd::Undo
+                | Cmd::Edit { .. }
+                | Cmd::Pri { .. }
+                | Cmd::Due { .. }
+                | Cmd::Mv { .. }
+                | Cmd::Note { .. }
+                | Cmd::Compact
+        )
+    }
+}
 
 fn run(cli: &Cli) -> Result<()> {
     let ctx = Ctx::build(cli)?;
@@ -289,19 +318,16 @@ fn open(cli: &Cli, ctx: &Ctx, may_create: bool) -> Result<Open> {
         maybe_gitignore(ctx, &resolved.path)?;
     }
 
+    // Adoption is only worth announcing when something is about to be written. A read
+    // that lands on a discovered file is harmless; a write to one you did not expect is
+    // not, so that case always speaks up.
     if let How::Adopted(sig) = &resolved.how {
-        ctx.note(&format!(
-            "using {} ({})",
-            resolved.path.display(),
-            sig.describe()
-        ));
+        if cli.cmd.as_ref().is_some_and(Cmd::mutates) {
+            ctx.note(&format!("{} · {}", tilde(&resolved.path), sig.describe()));
+        }
     }
     for s in &resolved.suggestions {
-        ctx.note(&format!(
-            "you also have tasks at {} ({})",
-            s.path.display(),
-            s.why
-        ));
+        ctx.note(&format!("also tracking {} · {}", tilde(&s.path), s.why));
     }
 
     let store = store::load(&resolved.path)?;
@@ -335,10 +361,21 @@ fn nudge_if_slow(ctx: &Ctx, store: &Store, registry: &mut Registry) {
         return;
     }
     entry.last_nudge = Some(today);
-    eprintln!(
-        "pd: this log took {}ms to read — `pd compact` will archive it and speed things up",
+    ctx.note(&format!(
+        "this log took {}ms to read — `pd compact` will archive it and speed things up",
         store.replay_micros / 1000
-    );
+    ));
+}
+
+/// The project a task file belongs to, shortened for human eyes: the containing
+/// directory rather than the dotfile itself, with `$HOME` collapsed to `~`.
+fn tilde(task_file: &Path) -> String {
+    let dir = task_file.parent().unwrap_or(task_file);
+    match dirs::home_dir().and_then(|h| dir.strip_prefix(h).ok().map(Path::to_path_buf)) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".into(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => dir.display().to_string(),
+    }
 }
 
 fn confirm(question: &str) -> Result<bool> {
