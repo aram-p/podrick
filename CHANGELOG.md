@@ -12,6 +12,18 @@ caller. A log written by any older `pd` must always still replay.
 
 ### Added
 
+- **`pd batch`** — many changes as one undoable action. Reads `{"op": …}` objects from
+  stdin, one per line or as a single JSON array, and appends every resulting event under
+  one batch id, so `pd undo` reverts the whole sweep rather than its last line. Covers
+  every single-task verb except `add`, which is excluded because `created` has no
+  compensating event. Operations address tasks by `id` only, nothing is written unless all
+  of them validate, and each is validated against the state its predecessors leave behind
+  — so closing a parent and then reopening a subtask it cascaded to does what it reads
+  like. An operation that would change nothing is skipped rather than refused.
+- **JSON contract**: each command in `pd --help --json` gained a `details` field carrying
+  its long help, where that says more than the one-line `about`. The schema claims to be
+  the whole API, and a command like `batch` whose contract is an input format was not
+  describable in one line. Additive; existing fields are unchanged.
 - `pd list --all` gained the short form **`-a`**. Because `list` is the implied command,
   argv normalisation now inserts it at the front rather than in front of the first
   positional, so `pd -a` and `pd -a <filter>` work as well as `pd list -a` — `list`'s own
@@ -43,6 +55,8 @@ caller. A log written by any older `pd` must always still replay.
 
 ### Changed
 
+- `pd undo` says "and 3 change(s)" for a batch of unrelated edits and keeps "subtask(s)"
+  for a cascade, rather than calling every grouped event a subtask.
 - **`pd config <key> <value> --here` is now `--project`.** `--here` is a global flag
   meaning "skip discovery and use this directory's own file", and one token cannot carry
   both meanings — spelling them the same made `pd config sort … --here` impossible in any

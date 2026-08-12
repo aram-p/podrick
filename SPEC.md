@@ -162,6 +162,11 @@ One JSON object per line:
 | `noted` | — (note with no state change) |
 | `compacted` | `snapshot` |
 
+Events that belong to one user action share a `batch`, whose value is the seq of the
+action's primary event — the one the user actually named. Closing a parent puts its
+cascaded subtasks in the parent's batch; `pd batch` puts everything it appends in one.
+`pd undo` reverts a batch whole or not at all, so half a cascade is never a state.
+
 `pd undo` appends a **compensating event** of the appropriate type carrying
 `"undo_of": <seq>`. History is never rewritten.
 
@@ -184,6 +189,8 @@ pd due    <path|id> <date|none>
 pd mv     <path|id> --under <path|id>
 pd note   <path|id> -m <note>
 
+pd batch                        many changes, one undo — ops as JSONL on stdin
+
 pd list [-a|--all] [--sort K] [-p N]
 pd all                          across every registered file
 pd log [<id>]                   the ledger
@@ -192,8 +199,20 @@ pd config [sort K] [--project]  no args = print resolved config chain
 pd files                        registry contents
 ```
 
-16 verbs. Global flags: `-g`, `-f <path>`, `--here`, `--json`, `--no-color`,
+17 verbs. Global flags: `-g`, `-f <path>`, `--here`, `--json`, `--no-color`,
 and the hidden `--now <iso>` (see §9).
+
+`pd batch` exists for the agent 90%: an agent that wants to restate forty tasks should
+leave one entry in the history, not forty, so that one `pd undo` puts them all back. It
+reads `{"op": …}` objects — one per line, or a single JSON array — and covers every
+single-task verb except `add`, which is excluded because `created` has no compensating
+event and a batch containing one could only ever be half-undone. Operations address tasks
+by `id` only: a path is a position, and positions shift as earlier ops in the same batch
+land. Nothing is appended unless every operation validates, and each is validated against
+the state its predecessors leave behind, so a batch that closes a parent and then reopens
+one of the subtasks it just cascaded to means what it says. An operation that would change
+nothing is skipped rather than refused — a sweep over every task should not fail because
+three of them were already right.
 
 Quoting is optional — trailing positionals are joined. `--` ends flag parsing.
 `-m` notes take a quoted string.
@@ -233,7 +252,9 @@ on a minor bump and only with a note in the changelog — see §13.
 
 `pd --help --json` emits a machine-readable schema of the entire command surface —
 every command, flag, argument, and return shape in one call. This is the bet that a
-well-behaved CLI beats an MCP server: one call and the agent has the whole API.
+well-behaved CLI beats an MCP server: one call and the agent has the whole API. A command
+whose contract is longer than one line — `pd batch` takes an input format — carries it in
+`details` beside the one-line `about`, so the schema is genuinely sufficient on its own.
 
 All human-facing help text carries a concrete example per command and states what
 `--json` returns.

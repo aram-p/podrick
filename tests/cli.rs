@@ -830,6 +830,107 @@ fn an_adopted_file_is_announced_on_writes_and_kept_quiet_on_reads() {
     );
 }
 
+#[test]
+fn a_batch_is_one_undoable_action() {
+    let s = Sandbox::new();
+    let a = s.add(&["one"]);
+    let b = s.add(&["two"]);
+    let c = s.add(&["three"]);
+
+    let ops = format!(
+        "{{\"op\":\"edit\",\"id\":\"{a}\",\"text\":\"One\"}}\n\
+         {{\"op\":\"edit\",\"id\":\"{b}\",\"text\":\"Two\"}}\n\
+         {{\"op\":\"pri\",\"id\":\"{c}\",\"priority\":\"p1\"}}\n"
+    );
+    let out = s.pd().arg("batch").write_stdin(ops).output().expect("run");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert_eq!(order(&s.json(&["list", "--json"])), ["One", "Two", "three"]);
+
+    // One undo, not three. The point of the feature.
+    let v = s.json(&["undo", "--json"]);
+    assert_eq!(v["events_reverted"], 3);
+    assert_eq!(
+        order(&s.json(&["list", "--json"])),
+        ["one", "two", "three"],
+        "every change goes back together"
+    );
+    assert_eq!(
+        s.json(&["list", "--json"])["tasks"][2]["priority"],
+        Value::Null
+    );
+}
+
+#[test]
+fn a_batch_that_fails_anywhere_writes_nothing() {
+    let s = Sandbox::new();
+    let a = s.add(&["one"]);
+    let b = s.add(&["two"]);
+    let before = std::fs::read_to_string(s.path().join(".podrick")).unwrap();
+
+    let ops = format!(
+        "{{\"op\":\"edit\",\"id\":\"{a}\",\"text\":\"One\"}}\n\
+         {{\"op\":\"pri\",\"id\":\"{b}\",\"priority\":\"p9\"}}\n"
+    );
+    let out = s.pd().arg("batch").write_stdin(ops).output().expect("run");
+    assert_eq!(out.status.code(), Some(2), "a bad op is a usage error");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("line 2"), "name the line: {stderr}");
+
+    assert_eq!(
+        std::fs::read_to_string(s.path().join(".podrick")).unwrap(),
+        before,
+        "line 1 must not have landed"
+    );
+}
+
+#[test]
+fn a_batch_operation_sees_what_the_ones_before_it_did() {
+    let s = Sandbox::new();
+    let parent = s.add(&["parent"]);
+    let child = s.add(&["child", "--under", &parent]);
+
+    // `reopen` on an already-open task is a no-op and is skipped. Here it is not a no-op,
+    // because the `done` on the line above cascaded the child closed first — which only
+    // holds if each op is judged against the state its predecessors leave behind.
+    let ops = format!(
+        "{{\"op\":\"done\",\"id\":\"{parent}\"}}\n\
+         {{\"op\":\"reopen\",\"id\":\"{child}\"}}\n"
+    );
+    let out = s.pd().arg("batch").write_stdin(ops).output().expect("run");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let tasks = s.json(&["list", "--all", "--json"])["tasks"].clone();
+    let state = |id: &str| -> String {
+        tasks
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["id"] == id)
+            .expect("task")["state"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(state(&parent), "done");
+    assert_eq!(
+        state(&child),
+        "open",
+        "the reopen took effect after the cascade"
+    );
+
+    // And all three events — the cascade and the reopen — are still one action.
+    assert_eq!(s.json(&["undo", "--json"])["events_reverted"], 3);
+}
+
 fn order(v: &Value) -> Vec<String> {
     v["tasks"]
         .as_array()

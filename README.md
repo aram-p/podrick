@@ -75,6 +75,7 @@ project has its own list. `-g` uses a global one. `pd all` shows every list at o
 | `pd undo` | reverts the last action, cascades included |
 | `pd edit` / `pri` / `due` / `mv` / `note` | change one field |
 | `pd list` | `-a/--all`, `--sort priority\|due\|created\|alpha`, `-p` |
+| `pd batch` | many changes, one undo — ops as JSONL on stdin |
 | `pd all` / `pd files` | across every known list |
 | `pd log [id]` | the ledger |
 | `pd compact` | archive the log, keep the state |
@@ -96,6 +97,14 @@ that has already passed means tomorrow. There is no recurrence, on purpose.
 - **Exit codes**: `0` ok · `1` not found · `2` usage · `3` conflict · `4` I/O.
 - **No prompt ever fires without a TTY.** Where a human would be asked to confirm, a
   script gets an error naming the flag that would have said yes.
+- **`pd batch` for sweeps.** Restating forty tasks should leave one entry in the history,
+  not forty, so that one `pd undo` puts them all back:
+
+  ```sh
+  pd list --json | jq -c '.tasks[] | {op:"edit", id, text:(.text|ascii_upcase[0:1]+.[1:])}' | pd batch
+  ```
+
+  Nothing is appended unless every operation validates. See `pd batch --help`.
 - **`id` is permanent, `path` is positional.** `2.1` is convenient to type but shifts
   whenever the tree changes, so a path-addressed write from a non-interactive caller is
   refused unless it passes `--expect-seq <n>` matching the seq it last read. Address

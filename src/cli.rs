@@ -210,6 +210,33 @@ pub enum Cmd {
         project: bool,
     },
 
+    /// Apply many changes as a single, single-undo action
+    ///
+    /// Reads operations from stdin, one JSON object per line (a JSON array of the same
+    /// objects also works). Every resulting event shares one batch id, so `pd undo`
+    /// reverts the whole set and never half of it.
+    ///
+    /// Nothing is written unless every operation validates, so a typo on line 40 does not
+    /// leave lines 1-39 applied.
+    ///
+    /// OPERATIONS
+    ///   {"op":"edit",   "id":"a7f", "text":"New text"}
+    ///   {"op":"pri",    "id":"a7f", "priority":"p1"}       p1-p4, or none
+    ///   {"op":"due",    "id":"a7f", "when":"friday 3pm"}   or "none" to clear
+    ///   {"op":"mv",     "id":"a7f", "under":"b2c"}         or "top":true
+    ///   {"op":"done",   "id":"a7f", "note":"optional"}     cascades to open subtasks
+    ///   {"op":"reopen", "id":"a7f"}
+    ///   {"op":"drop",   "id":"a7f", "note":"optional"}     cascades to open subtasks
+    ///   {"op":"note",   "id":"a7f", "message":"..."}
+    ///
+    /// `add` is deliberately not available here: `created` has no compensating event, so
+    /// a batch containing one could only ever be half-undone.
+    #[command(after_help = "EXAMPLE\n  \
+            # capitalise every task, as one undoable action\n  \
+            pd list --json | jq -c '.tasks[] | {op:\"edit\", id, \
+            text:(.text|ascii_upcase[0:1]+.[1:])}' | pd batch")]
+    Batch,
+
     /// List every known task file
     #[command(after_help = "EXAMPLE\n  pd files --json")]
     Files,

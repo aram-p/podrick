@@ -13,7 +13,7 @@ mod render;
 mod state;
 mod store;
 
-use std::io::{IsTerminal, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -216,6 +216,7 @@ impl Cmd {
             | Cmd::Due { .. }
             | Cmd::Mv { .. }
             | Cmd::Note { .. }
+            | Cmd::Batch
             | Cmd::Compact => true,
             // Setting a value writes the registry or config.toml; reading the chain does
             // not. The list form of this predicate had `Config` filed under "read".
@@ -275,6 +276,7 @@ fn run(cli: &Cli) -> Result<()> {
         Some(Cmd::Note { target, message }) => cmd_note(cli, &ctx, target, message),
         Some(Cmd::All) => cmd_all(&ctx),
         Some(Cmd::Log { target, limit }) => cmd_log(cli, &ctx, target.as_deref(), *limit),
+        Some(Cmd::Batch) => cmd_batch(cli, &ctx),
         Some(Cmd::Compact) => cmd_compact(cli, &ctx),
         Some(Cmd::Config {
             key,
@@ -564,9 +566,17 @@ fn command_schema() -> Value {
                     })
                 })
                 .collect();
+            // `about` is one line, which is enough for most commands. Where a command's
+            // real contract is longer than that — `batch` takes a whole input format —
+            // the long form carries it, and an agent reading only this schema would
+            // otherwise never see it.
+            let details = sc.get_long_about().map(|a| a.to_string()).filter(|long| {
+                Some(long.as_str()) != sc.get_about().map(|a| a.to_string()).as_deref()
+            });
             json!({
                 "name": sc.get_name(),
                 "about": sc.get_about().map(|a| a.to_string()),
+                "details": details,
                 "args": args,
             })
         })
@@ -960,10 +970,20 @@ fn cmd_undo(cli: &Cli, ctx: &Ctx) -> Result<()> {
         let verb = format!("{:?}", orig.ev).to_lowercase();
         println!("undid {verb} on {what}");
         if reverted > 1 {
+            // A batch's members are cascaded subtasks or arbitrary tasks, depending on
+            // whether it came from `pd done` or `pd batch`.
+            let noun = if group
+                .iter()
+                .all(|e| e.seq == orig.seq || e.data.cascaded_from.is_some())
+            {
+                "subtask"
+            } else {
+                "change"
+            };
             println!(
                 "{}",
                 ctx.style
-                    .dim(&format!("      and {} subtask(s)", reverted - 1))
+                    .dim(&format!("      and {} {noun}(s)", reverted - 1))
             );
         }
     }
@@ -1096,17 +1116,7 @@ fn cmd_mv(cli: &Cli, ctx: &Ctx, target: &str, under: Option<&str>, top: bool) ->
             if open.store.state.would_cycle(&id, &pid) {
                 return Err(AppError::usage("that would put a task inside itself"));
             }
-            let subtree_height = open
-                .store
-                .state
-                .descendants(&id)
-                .iter()
-                .map(|d| open.store.state.depth(&d.id))
-                .max()
-                .unwrap_or(open.store.state.depth(&id))
-                - open.store.state.depth(&id)
-                + 1;
-            if open.store.state.depth(&pid) + subtree_height > MAX_DEPTH {
+            if open.store.state.depth(&pid) + subtree_height(&open.store.state, &id) > MAX_DEPTH {
                 return Err(AppError::usage(format!(
                     "that would nest deeper than {MAX_DEPTH} levels"
                 )));
@@ -1189,6 +1199,329 @@ fn cmd_note(cli: &Cli, ctx: &Ctx, target: &str, message: &str) -> Result<()> {
         println!("noted  {}", task.text);
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Batch
+// ---------------------------------------------------------------------------
+
+/// One line of `pd batch` input.
+///
+/// An internally tagged enum, so an unknown `op` is named in the error rather than
+/// silently doing nothing, and so a field belonging to a different operation —
+/// `{"op":"edit","priority":"p1"}` — is rejected instead of ignored.
+///
+/// `add` is absent on purpose: `created` has no compensating event, so a batch holding
+/// one could only ever be half-undone, and the whole point of a batch is that it undoes
+/// as a unit.
+#[derive(serde::Deserialize, Debug)]
+#[serde(tag = "op", rename_all = "lowercase", deny_unknown_fields)]
+enum Op {
+    Edit {
+        id: String,
+        text: String,
+    },
+    Pri {
+        id: String,
+        priority: String,
+    },
+    Due {
+        id: String,
+        when: String,
+    },
+    Mv {
+        id: String,
+        #[serde(default)]
+        under: Option<String>,
+        #[serde(default)]
+        top: bool,
+    },
+    Done {
+        id: String,
+        #[serde(default)]
+        note: Option<String>,
+    },
+    Reopen {
+        id: String,
+        #[serde(default)]
+        note: Option<String>,
+    },
+    Drop {
+        id: String,
+        #[serde(default)]
+        note: Option<String>,
+    },
+    Note {
+        id: String,
+        message: String,
+    },
+}
+
+impl Op {
+    fn id(&self) -> &str {
+        match self {
+            Op::Edit { id, .. }
+            | Op::Pri { id, .. }
+            | Op::Due { id, .. }
+            | Op::Mv { id, .. }
+            | Op::Done { id, .. }
+            | Op::Reopen { id, .. }
+            | Op::Drop { id, .. }
+            | Op::Note { id, .. } => id,
+        }
+    }
+}
+
+/// Read the operations, as JSONL or as one JSON array of the same objects.
+///
+/// Each op is paired with the input line it came from, because the only thing worse than
+/// rejecting line 40 of 200 is not saying which line.
+fn parse_ops(input: &str) -> Result<Vec<(usize, Op)>> {
+    let bad = |line: usize, e: serde_json::Error| {
+        AppError::usage(format!("line {line}: {e}")).with_hint("see `pd batch --help`")
+    };
+
+    if input.trim_start().starts_with('[') {
+        let ops: Vec<Op> = serde_json::from_str(input).map_err(|e| bad(e.line(), e))?;
+        return Ok(ops
+            .into_iter()
+            .enumerate()
+            .map(|(i, o)| (i + 1, o))
+            .collect());
+    }
+
+    input
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| !l.trim().is_empty())
+        .map(|(i, l)| {
+            serde_json::from_str(l)
+                .map(|o| (i + 1, o))
+                .map_err(|e| bad(i + 1, e))
+        })
+        .collect()
+}
+
+fn cmd_batch(cli: &Cli, ctx: &Ctx) -> Result<()> {
+    let mut input = String::new();
+    std::io::stdin()
+        .read_to_string(&mut input)
+        .map_err(|e| AppError::io(e.to_string()))?;
+    let ops = parse_ops(&input)?;
+    if ops.is_empty() {
+        return Err(AppError::usage("no operations on stdin")
+            .with_hint("one JSON object per line; see `pd batch --help`"));
+    }
+
+    let open = open(cli, ctx, false)?;
+    let path = open.resolved.path.clone();
+
+    // Every op is validated against the state its predecessors leave behind, so a batch
+    // that completes a parent and then edits one of the subtasks it just cascaded to is
+    // judged on what will actually be true, not on what was true when the batch started.
+    let mut sim = open.store.state;
+    let mut events: Vec<Event> = Vec::new();
+
+    for (line, op) in &ops {
+        let fail = |msg: String| AppError::usage(format!("line {line}: {msg}"));
+
+        // Ids only. A path is a position, and positions shift as earlier ops in the same
+        // batch land — `2.1` would mean different tasks depending on where it appeared.
+        let id = op.id();
+        if !sim.contains_id(id) {
+            return Err(AppError::not_found(format!("line {line}: no task {id:?}"))
+                .with_hint("batch operations address tasks by id, never by path"));
+        }
+        let task = sim.get(id).expect("checked above").clone();
+        let seq = sim.last_seq + 1;
+        let ev = |kind: Kind| Event::new(seq, ctx.ts(), ctx.actor, kind, id);
+
+        let mut produced: Vec<Event> = Vec::new();
+        match op {
+            Op::Edit { text, .. } => {
+                if text.trim().is_empty() {
+                    return Err(fail("a task needs some text".into()));
+                }
+                produced.push(ev(Kind::Edited).with_data(Data {
+                    from: Some(json!(task.text)),
+                    to: Some(json!(text)),
+                    ..Default::default()
+                }));
+            }
+            Op::Pri { priority, .. } => {
+                let p = cli::parse_priority(priority).map_err(fail)?;
+                if task.priority == p {
+                    continue; // already there; a batch tolerates what a single command rejects
+                }
+                produced.push(ev(Kind::Reprioritized).with_data(Data {
+                    from: Some(task.priority.map(Value::from).unwrap_or(Value::Null)),
+                    to: Some(p.map(Value::from).unwrap_or(Value::Null)),
+                    ..Default::default()
+                }));
+            }
+            Op::Due { when, .. } => {
+                let due = dates::parse(when, ctx.now).map_err(|e| fail(e.to_string()))?;
+                if task.due == due {
+                    continue;
+                }
+                produced.push(ev(Kind::Rescheduled).with_data(Data {
+                    from: Some(task.due.clone().map(Value::from).unwrap_or(Value::Null)),
+                    to: Some(due.map(Value::from).unwrap_or(Value::Null)),
+                    ..Default::default()
+                }));
+            }
+            Op::Mv { under, top, .. } => {
+                if under.is_none() && !*top {
+                    return Err(fail("say where to: \"under\" or \"top\":true".into()));
+                }
+                let new_parent = match under {
+                    Some(u) => {
+                        if !sim.contains_id(u) {
+                            return Err(AppError::not_found(format!(
+                                "line {line}: no task {u:?} to move under"
+                            )));
+                        }
+                        if sim.would_cycle(id, u) {
+                            return Err(fail("that would put a task inside itself".into()));
+                        }
+                        if sim.depth(u) + subtree_height(&sim, id) > MAX_DEPTH {
+                            return Err(fail(format!(
+                                "that would nest deeper than {MAX_DEPTH} levels"
+                            )));
+                        }
+                        Some(u.clone())
+                    }
+                    None => None,
+                };
+                if task.parent == new_parent {
+                    continue;
+                }
+                produced.push(ev(Kind::Moved).with_data(Data {
+                    from_parent: Some(task.parent.clone().map(Value::from).unwrap_or(Value::Null)),
+                    to_parent: Some(new_parent.map(Value::from).unwrap_or(Value::Null)),
+                    ..Default::default()
+                }));
+            }
+            Op::Note { message, .. } => {
+                produced.push(ev(Kind::Noted).with_note(Some(message.clone())));
+            }
+            Op::Done { note, .. } | Op::Reopen { note, .. } | Op::Drop { note, .. } => {
+                let kind = match op {
+                    Op::Done { .. } => Kind::Completed,
+                    Op::Reopen { .. } => Kind::Uncompleted,
+                    _ => Kind::Dropped,
+                };
+                let already = matches!(
+                    (kind, task.state),
+                    (Kind::Completed, TaskState::Done)
+                        | (Kind::Uncompleted, TaskState::Open)
+                        | (Kind::Dropped, TaskState::Dropped)
+                );
+                if already {
+                    continue;
+                }
+                // Closing cascades here exactly as it does in `pd done`, or the two
+                // commands would disagree about what closing a parent means.
+                let cascade: Vec<String> = if kind == Kind::Completed || kind == Kind::Dropped {
+                    sim.descendants(id)
+                        .into_iter()
+                        .filter(|d| d.state.is_open())
+                        .map(|d| d.id.clone())
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                for (i, did) in cascade.iter().enumerate() {
+                    produced.push(
+                        Event::new(seq + i as u64, ctx.ts(), ctx.actor, kind, did).with_data(
+                            Data {
+                                cascaded_from: Some(id.to_string()),
+                                ..Default::default()
+                            },
+                        ),
+                    );
+                }
+                produced.push(
+                    Event::new(seq + cascade.len() as u64, ctx.ts(), ctx.actor, kind, id)
+                        .with_note(note.clone()),
+                );
+            }
+        }
+
+        for e in produced {
+            sim.apply(&e);
+            events.push(e);
+        }
+    }
+
+    if events.is_empty() {
+        return Err(AppError::usage(format!(
+            "{} operation(s), none of which change anything",
+            ops.len()
+        )));
+    }
+
+    // The batch id is the seq of an event that has an inverse: `pd undo` looks for an
+    // undoable primary, so anchoring on a `noted` would make the whole batch invisible to
+    // it, and undo would revert something older while leaving this batch in place.
+    //
+    // Cascaded events are passed over first, so `pd undo` reports the task the caller
+    // actually named rather than one of the subtasks that came along with it — the same
+    // choice `pd done` makes.
+    let anchor = |cascaded: bool| {
+        events
+            .iter()
+            .find(|e| e.ev.inverse().is_some() && e.data.cascaded_from.is_some() == cascaded)
+            .map(|e| e.seq)
+    };
+    if let Some(primary) = anchor(false).or_else(|| anchor(true)) {
+        for e in &mut events {
+            e.batch = Some(primary);
+        }
+    }
+    let batch_id = events.iter().find_map(|e| e.batch);
+
+    store::append(&path, &events)?;
+
+    let after = store::load(&path)?;
+    if ctx.json {
+        ctx.emit(envelope_at(
+            &path,
+            after.state.last_seq,
+            [
+                ("operations", json!(ops.len())),
+                ("events", json!(events.len())),
+                ("batch", json!(batch_id)),
+            ],
+        ));
+    } else {
+        println!(
+            "applied {} operation(s) as {} event(s)",
+            ops.len(),
+            events.len()
+        );
+        if let Some(b) = batch_id {
+            println!(
+                "{}",
+                ctx.style
+                    .dim(&format!("        undo reverts all of it (batch {b})"))
+            );
+        }
+    }
+    Ok(())
+}
+
+/// How many levels a task's subtree occupies, counting the task itself.
+fn subtree_height(state: &State, id: &str) -> usize {
+    let base = state.depth(id);
+    state
+        .descendants(id)
+        .iter()
+        .map(|d| state.depth(&d.id))
+        .max()
+        .unwrap_or(base)
+        - base
+        + 1
 }
 
 fn cmd_log(cli: &Cli, ctx: &Ctx, target: Option<&str>, limit: usize) -> Result<()> {
