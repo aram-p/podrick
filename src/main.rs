@@ -190,24 +190,34 @@ impl Ctx {
 // ---------------------------------------------------------------------------
 
 impl Cmd {
-    /// Whether this command appends to the ledger. Adoption of a file found through
+    /// Whether this command writes something durable. Adoption of a file found through
     /// discovery is announced only for these — knowing *where* a write landed matters,
     /// whereas repeating it on every bare `pd` is just noise.
+    ///
+    /// Written as an exhaustive match rather than a `matches!` list so that adding a
+    /// command fails to compile until someone answers the question for it.
     fn mutates(&self) -> bool {
-        matches!(
-            self,
+        match self {
             Cmd::Add { .. }
-                | Cmd::Done { .. }
-                | Cmd::Reopen { .. }
-                | Cmd::Drop { .. }
-                | Cmd::Undo
-                | Cmd::Edit { .. }
-                | Cmd::Pri { .. }
-                | Cmd::Due { .. }
-                | Cmd::Mv { .. }
-                | Cmd::Note { .. }
-                | Cmd::Compact
-        )
+            | Cmd::Done { .. }
+            | Cmd::Reopen { .. }
+            | Cmd::Drop { .. }
+            | Cmd::Undo
+            | Cmd::Edit { .. }
+            | Cmd::Pri { .. }
+            | Cmd::Due { .. }
+            | Cmd::Mv { .. }
+            | Cmd::Note { .. }
+            | Cmd::Compact => true,
+            // Setting a value writes the registry or config.toml; reading the chain does
+            // not. The list form of this predicate had `Config` filed under "read".
+            Cmd::Config { value, .. } => value.is_some(),
+            Cmd::List { .. }
+            | Cmd::All
+            | Cmd::Log { .. }
+            | Cmd::Files
+            | Cmd::Completions { .. } => false,
+        }
     }
 }
 
@@ -258,9 +268,11 @@ fn run(cli: &Cli) -> Result<()> {
         Some(Cmd::All) => cmd_all(&ctx),
         Some(Cmd::Log { target, limit }) => cmd_log(cli, &ctx, target.as_deref(), *limit),
         Some(Cmd::Compact) => cmd_compact(cli, &ctx),
-        Some(Cmd::Config { key, value, here }) => {
-            cmd_config(cli, &ctx, key.as_deref(), value.as_deref(), *here)
-        }
+        Some(Cmd::Config {
+            key,
+            value,
+            project,
+        }) => cmd_config(cli, &ctx, key.as_deref(), value.as_deref(), *project),
         Some(Cmd::Files) => cmd_files(&ctx),
         Some(Cmd::Completions { shell }) => {
             clap_complete::generate(*shell, &mut Cli::command(), "pd", &mut std::io::stdout());
@@ -1236,7 +1248,7 @@ fn cmd_config(
     ctx: &Ctx,
     key: Option<&str>,
     value: Option<&str>,
-    here: bool,
+    project_scope: bool,
 ) -> Result<()> {
     let mut cfg = config::Config::load()?;
 
@@ -1246,9 +1258,10 @@ fn cmd_config(
     match (key, value) {
         (Some("sort"), Some(v)) => {
             let parsed: Sort = v.parse()?;
-            if here {
+            if project_scope {
                 let mut o = opened.ok_or_else(|| {
-                    AppError::not_found("--here needs a task file in this directory")
+                    AppError::not_found("--project needs a task file to attach the setting to")
+                        .with_hint("run it inside a project, or drop --project to set it globally")
                 })?;
                 let ts = ctx.ts();
                 o.registry.upsert(&o.resolved.path, &ts).sort = Some(parsed);
@@ -1264,7 +1277,9 @@ fn cmd_config(
                 }
             }
             if ctx.json {
-                ctx.emit(json!({ "sort": v, "scope": if here { "project" } else { "global" } }));
+                ctx.emit(
+                    json!({ "sort": v, "scope": if project_scope { "project" } else { "global" } }),
+                );
             }
             return Ok(());
         }

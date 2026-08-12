@@ -196,13 +196,18 @@ pub enum Cmd {
     /// Show or set configuration
     ///
     /// With no arguments, prints the resolved chain so the ordering is never a mystery.
-    #[command(after_help = "EXAMPLE\n  pd config sort due --here")]
+    #[command(after_help = "EXAMPLE\n  pd config sort due --project")]
     Config {
         key: Option<String>,
         value: Option<String>,
         /// Apply to this project only, rather than globally
+        ///
+        /// Named `--project` rather than `--here` because the global `--here` means
+        /// something else — "skip discovery and use cwd's own file" — and one token
+        /// cannot mean both. Spelling them the same made `pd config sort … --here`
+        /// impossible in any directory whose file came from discovery.
         #[arg(long)]
-        here: bool,
+        project: bool,
     },
 
     /// List every known task file

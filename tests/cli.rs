@@ -494,7 +494,7 @@ fn a_project_sort_overrides_the_global_one() {
     s.add(&["zebra"]);
     s.add(&["apple"]);
     s.run(&["config", "sort", "created"]);
-    s.run(&["config", "sort", "alpha", "--here"]);
+    s.run(&["config", "sort", "alpha", "--project"]);
 
     let v = s.json(&["config", "--json"]);
     assert_eq!(v["sort"]["global"], "created");
@@ -508,6 +508,52 @@ fn an_unknown_sort_key_is_a_usage_error() {
     let s = Sandbox::new();
     s.add(&["first"]);
     assert_eq!(s.run(&["list", "--sort", "banana"]).status.code(), Some(2));
+}
+
+/// `--project` used to be spelled `--here`, which is also a global flag meaning "skip
+/// discovery and use cwd". One token set both, so scoping a setting to the project you
+/// were actually working in was impossible whenever the file came from discovery — the
+/// global sense forced resolution back to cwd, where there was no file.
+#[test]
+fn a_project_setting_works_against_a_file_found_by_discovery() {
+    let s = Sandbox::new();
+    let proj = s.path().join("proj");
+    std::fs::create_dir(&proj).unwrap();
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&proj)
+        .status()
+        .expect("git init");
+
+    let out = s
+        .pd()
+        .current_dir(&proj)
+        .args(["--here", "add", "zebra", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let out = s
+        .pd()
+        .current_dir(&proj)
+        .args(["add", "apple", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    // From the parent, the file is reachable only through the registry.
+    assert_eq!(order(&s.json(&["list", "--json"])), ["zebra", "apple"]);
+
+    let out = s.run(&["config", "sort", "alpha", "--project"]);
+    assert!(
+        out.status.success(),
+        "scoping to an adopted project must work: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // It attached to *that* file's entry, not to a new one in cwd.
+    assert!(!s.path().join(".podrick").exists(), "no stray file created");
+    assert_eq!(order(&s.json(&["list", "--json"])), ["apple", "zebra"]);
+    assert_eq!(s.json(&["config", "--json"])["sort"]["project"], "alpha");
 }
 
 /// Same bad value, same answer, whichever layer it came from. It used to be exit 2 from
