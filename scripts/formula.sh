@@ -15,8 +15,25 @@ fi
 version="${tag#v}"
 base="https://github.com/aram-p/podrick/releases/download/$tag"
 
+# `shasum` on macOS, `sha256sum` on the Linux runner.
+digest() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi
+}
+
+# Release assets do not all become fetchable the instant the release does, and this runs
+# straight off the tag that published them. Retry rather than emit a formula with a hole.
 sha() {
-    curl -fsSL "$base/pd-$1.tar.gz" | shasum -a 256 | cut -d' ' -f1
+    local asset="$base/pd-$1.tar.gz" out
+    for attempt in 1 2 3 4 5; do
+        if out=$(curl -fsSL "$asset" | digest | cut -d' ' -f1) && [ -n "$out" ]; then
+            echo "$out"
+            return 0
+        fi
+        echo "waiting for $asset (attempt $attempt)" >&2
+        sleep 10
+    done
+    echo "could not fetch $asset" >&2
+    exit 1
 }
 
 mac_arm=$(sha aarch64-apple-darwin)

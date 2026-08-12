@@ -40,6 +40,43 @@ jobs:
         with:
           files: pd-${{ matrix.target }}.tar.gz
 
+  # The tap is a separate repository, so this cannot use GITHUB_TOKEN — that one is scoped
+  # to this repo. TAP_TOKEN is a fine-grained PAT with contents:write on homebrew-tap and
+  # nothing else. Absent, the job warns and skips, same as crates.io below.
+  tap:
+    needs: binaries
+    if: ${{ github.repository == 'aram-p/podrick' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Update the Homebrew tap
+        env:
+          TOKEN: ${{ secrets.TAP_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::warning::TAP_TOKEN is not set — skipping the Homebrew tap update."
+            echo "Set it with: gh secret set TAP_TOKEN --repo aram-p/podrick"
+            exit 0
+          fi
+          # Generated before the clone, so a failure to read the published checksums
+          # leaves the tap untouched rather than half-updated.
+          ./scripts/formula.sh "$TAG" > podrick.rb
+          git clone --depth 1 \
+            "https://x-access-token:$TOKEN@github.com/aram-p/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+          cp podrick.rb tap/Formula/podrick.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/podrick.rb
+          if git diff --cached --quiet; then
+            echo "The tap already describes $TAG."
+            exit 0
+          fi
+          git commit -m "podrick $TAG"
+          git push
+
   # Skipped rather than failed when no token is configured: the binaries above are the
   # release, and a missing crates.io token should not turn a good tag red.
   crates-io:
