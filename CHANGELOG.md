@@ -8,6 +8,23 @@ Changes to the three versioned contracts — JSON payloads, exit codes, and the 
 are always listed under their own heading, because those are the ones that can break a
 caller. A log written by any older `pd` must always still replay.
 
+## Unreleased
+
+### Fixed
+
+- **The list ignored the width of the terminal.** The layout was a fixed 81 columns —
+  a 58-wide text column plus 23 of chrome — so anything narrower wrapped the ids onto
+  their own lines, and a title longer than 58 pushed its id rightwards until the ids
+  stopped forming a column at all. The text column is now whatever is left after the
+  gutter, the dates and the ids, and a title too long for it wraps at a word boundary and
+  hangs under the text, with the date and id staying on the task's first line.
+- **A list with no dates in it reserved eleven columns for a date column.** That was most
+  of what pushed a narrow terminal over the edge. The column is drawn only when some task
+  in the list actually has a date, and is only as wide as the longest one.
+- The text column's cap rose from 58 to 72, so ordinary long titles stop wrapping on a
+  wide terminal. `PODRICK_COLUMNS` overrides the detected width, as `PODRICK_NOW`
+  overrides the clock.
+
 ## 0.1.1
 
 ### Added

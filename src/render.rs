@@ -16,7 +16,83 @@ const P1: &str = "\x1b[38;5;203m";
 const P2: &str = "\x1b[38;5;215m";
 const P3: &str = "\x1b[38;5;110m";
 
-const TEXT_COL_MAX: usize = 58;
+/// The widest the text column is ever allowed to get, however wide the terminal is.
+/// Around seventy characters is the readable measure, and past it the ids drift so far
+/// from their tasks that the right-hand column stops being scannable.
+const TEXT_COL_MAX: usize = 72;
+
+/// The narrowest it is allowed to get. Below this the terminal is too small for the
+/// layout, and overflowing is a better answer than wrapping every title to three letters.
+const TEXT_COL_MIN: usize = 16;
+
+/// Assumed width when nobody will tell us — a pipe, or a terminal that does not answer.
+const FALLBACK_COLUMNS: usize = 80;
+
+/// How many columns there are to draw in.
+///
+/// `PODRICK_COLUMNS` wins, both so the tests are deterministic and so anyone whose
+/// terminal lies about itself has a way out. Same escape hatch as `PODRICK_NOW`.
+fn columns() -> usize {
+    if let Some(n) = std::env::var("PODRICK_COLUMNS")
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+    {
+        return n;
+    }
+    terminal_size::terminal_size()
+        .map(|(terminal_size::Width(w), _)| w as usize)
+        .unwrap_or(FALLBACK_COLUMNS)
+}
+
+/// Break `text` to `width` columns, preferring word boundaries.
+///
+/// A word longer than the whole column is split rather than allowed to overhang — a
+/// pasted URL should not push the id off the screen for every other row too.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    let mut len = 0usize;
+
+    for word in text.split_whitespace() {
+        let wlen = word.chars().count();
+        if len > 0 && len + 1 + wlen > width {
+            lines.push(std::mem::take(&mut line));
+            len = 0;
+        }
+        // Still too long on a line of its own: hard-split it across as many as it needs.
+        if wlen > width {
+            let mut rest: &str = word;
+            while rest.chars().count() > width {
+                let cut = rest
+                    .char_indices()
+                    .nth(width - len.min(width))
+                    .map(|(i, _)| i)
+                    .unwrap_or(rest.len());
+                if len > 0 {
+                    line.push(' ');
+                }
+                line.push_str(&rest[..cut]);
+                lines.push(std::mem::take(&mut line));
+                len = 0;
+                rest = &rest[cut..];
+            }
+            line.push_str(rest);
+            len = rest.chars().count();
+            continue;
+        }
+        if len > 0 {
+            line.push(' ');
+            len += 1;
+        }
+        line.push_str(word);
+        len += wlen;
+    }
+    if !line.is_empty() || lines.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
 
 #[derive(Clone, Copy)]
 pub struct Style {
@@ -84,6 +160,12 @@ fn symbol(state: TaskState) -> &'static str {
 /// Render a set of rows. Plain mode emits `path<TAB>id<TAB>state<TAB>text<TAB>due`,
 /// which is what a pipe or a `NO_COLOR` terminal gets.
 pub fn rows(rows: &[Row], st: Style, now: DateTime<Local>) -> String {
+    rows_at(rows, st, now, columns())
+}
+
+/// The layout itself, with the terminal width handed in rather than discovered — so the
+/// tests can ask for a 40-column terminal without racing each other over an env var.
+fn rows_at(rows: &[Row], st: Style, now: DateTime<Local>, cols: usize) -> String {
     if !st.color {
         return rows
             .iter()
@@ -106,12 +188,28 @@ pub fn rows(rows: &[Row], st: Style, now: DateTime<Local>) -> String {
             .join("\n");
     }
 
-    let width = rows
+    // Only as wide as the list actually needs. A list with no dates in it should not pay
+    // eleven columns for a date column, least of all on a narrow terminal.
+    let due_w = rows
+        .iter()
+        .map(|r| due_visible_len(&r.due, now))
+        .max()
+        .unwrap_or(0);
+    let id_w = rows.iter().map(|r| r.id.chars().count()).max().unwrap_or(0);
+
+    // Everything on the line that is not the text: two-column gutter, priority bar,
+    // bullet, the space after it, the two-space gap, then the date and id columns.
+    let chrome = 2 + 2 + 1 + 1 + 2 + if due_w > 0 { due_w + 1 } else { 0 } + id_w;
+
+    let natural = rows
         .iter()
         .map(|r| 2 * r.depth.saturating_sub(1) + r.text.chars().count())
         .max()
-        .unwrap_or(0)
-        .min(TEXT_COL_MAX);
+        .unwrap_or(0);
+    let width = natural
+        .min(TEXT_COL_MAX)
+        .min(cols.saturating_sub(chrome))
+        .max(TEXT_COL_MIN);
 
     let mut out = String::new();
     for r in rows {
@@ -119,18 +217,14 @@ pub fn rows(rows: &[Row], st: Style, now: DateTime<Local>) -> String {
             out.push('\n');
         }
         // The bullet carries the indentation, not the text — that is what makes a tree
-        // read as a tree.
+        // read as a tree. The text column is what is left of `width` after that indent.
         let indent = "  ".repeat(r.depth.saturating_sub(1));
-        let visible = indent.chars().count() + r.text.chars().count();
-        let pad = width.saturating_sub(visible);
+        let indent_w = indent.chars().count();
+        let lines = wrap_text(&r.text, width.saturating_sub(indent_w).max(1));
 
         let sym = match r.state {
             TaskState::Open => format!("{indent}{}", symbol(r.state)),
             _ => st.dim(&format!("{indent}{}", symbol(r.state))),
-        };
-        let shown = match r.state {
-            TaskState::Open => r.text.clone(),
-            _ => st.dim(&r.text),
         };
 
         let due = match &r.due {
@@ -144,18 +238,34 @@ pub fn rows(rows: &[Row], st: Style, now: DateTime<Local>) -> String {
             }
             None => String::new(),
         };
-        let due_pad = 10usize.saturating_sub(due_visible_len(&r.due, now));
+        let due_col = if due_w > 0 {
+            format!(
+                "{due}{} ",
+                " ".repeat(due_w.saturating_sub(due_visible_len(&r.due, now)))
+            )
+        } else {
+            String::new()
+        };
 
-        out.push_str(&format!(
-            "  {}{} {}{} {}{} {}\n",
-            st.priority_bar(r.priority),
-            sym,
-            shown,
-            " ".repeat(pad + 2),
-            due,
-            " ".repeat(due_pad),
-            st.dim(&r.id),
-        ));
+        // The date and the id belong to the task, so they sit on its first line; the rest
+        // of a wrapped title hangs under the text, clear of the bullet column.
+        for (i, line) in lines.iter().enumerate() {
+            let shown = match r.state {
+                TaskState::Open => line.clone(),
+                _ => st.dim(line),
+            };
+            let pad = " ".repeat(width.saturating_sub(indent_w + line.chars().count()) + 2);
+            if i == 0 {
+                out.push_str(&format!(
+                    "  {}{} {shown}{pad}{due_col}{}\n",
+                    st.priority_bar(r.priority),
+                    sym,
+                    st.dim(&r.id),
+                ));
+            } else {
+                out.push_str(&format!("      {}{shown}\n", " ".repeat(indent_w)));
+            }
+        }
     }
     out.trim_end().to_string()
 }
@@ -405,6 +515,131 @@ mod tests {
     fn colour_mode_emits_escape_codes() {
         let out = rows(&[row("a7f", "x", 1, Some(1))], Style { color: true }, now());
         assert!(out.contains('\x1b'));
+    }
+
+    /// Every visible line of a coloured render, with the ANSI stripped, as the terminal
+    /// would count them.
+    fn visible_lines(out: &str) -> Vec<String> {
+        let mut plain = String::new();
+        let mut chars = out.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                for c in chars.by_ref() {
+                    if c == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                plain.push(c);
+            }
+        }
+        plain
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| l.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn no_line_is_wider_than_the_terminal() {
+        let long = "write AGENTS.md with the RTL-safety and native-divergence rules";
+        let rs = [
+            row("rj8", "stand up the repo skeleton", 1, Some(1)),
+            row("cxc", "init the pnpm monorepo with apps/api", 2, None),
+            row("7r3", long, 2, None),
+        ];
+        for cols in [40usize, 56, 64, 72, 100, 200] {
+            for line in visible_lines(&rows_at(&rs, Style { color: true }, now(), cols)) {
+                assert!(
+                    line.chars().count() <= cols.max(TEXT_COL_MIN + 12),
+                    "at {cols} columns a line ran to {}: {line:?}",
+                    line.chars().count()
+                );
+            }
+        }
+    }
+
+    /// The bug this fixes: a title past the column pushed its id rightwards, so the ids
+    /// no longer formed a column.
+    #[test]
+    fn every_id_lands_in_the_same_column() {
+        let rs = [
+            row("rj8", "short", 1, Some(1)),
+            row("cxc", "a middling sort of task title here", 2, None),
+            row(
+                "7r3",
+                "a title long enough that it has to wrap onto a second line",
+                2,
+                None,
+            ),
+        ];
+        let lines = visible_lines(&rows_at(&rs, Style { color: true }, now(), 72));
+        let columns_of_ids: Vec<usize> = lines
+            .iter()
+            .filter_map(|l| l.rfind(|c: char| !c.is_whitespace()).map(|_| l))
+            .filter(|l| ["rj8", "cxc", "7r3"].iter().any(|id| l.ends_with(id)))
+            .map(|l| l.chars().count() - 3)
+            .collect();
+        assert_eq!(columns_of_ids.len(), 3, "one id per task: {lines:?}");
+        assert!(
+            columns_of_ids.iter().all(|c| *c == columns_of_ids[0]),
+            "ids must form a column, got {columns_of_ids:?} in {lines:?}"
+        );
+    }
+
+    /// A wrapped title hangs under the text, not under the bullet, and keeps its id on
+    /// the first line where the task is.
+    #[test]
+    fn a_wrapped_title_hangs_under_its_own_text() {
+        let rs = [row(
+            "7r3",
+            "a title long enough that it has to wrap onto a second line",
+            2,
+            None,
+        )];
+        let lines = visible_lines(&rows_at(&rs, Style { color: true }, now(), 50));
+        assert_eq!(lines.len(), 2, "should wrap once: {lines:?}");
+        assert!(lines[0].ends_with("7r3"), "id on the first line");
+        assert!(!lines[1].contains("7r3"), "and only there");
+        // Counted in characters, not bytes — the bullet is three bytes wide and one
+        // column wide, and it is the column that has to line up.
+        let text_col = lines[0][..lines[0].find("a title").expect("text on line 1")]
+            .chars()
+            .count();
+        let cont_col = lines[1].chars().take_while(|c| *c == ' ').count();
+        assert_eq!(cont_col, text_col, "continuation aligns with the text");
+    }
+
+    /// A list with no dates in it should not reserve a date column — that waste is most
+    /// of what pushed a narrow terminal into wrapping.
+    #[test]
+    fn a_list_without_dates_spends_nothing_on_a_date_column() {
+        let text = "a task title of a very particular length indeed";
+        let dated = Row {
+            due: Some("2026-08-20".into()),
+            ..row("aaa", text, 1, None)
+        };
+        let undated = row("aaa", text, 1, None);
+
+        let width = |r: Row| {
+            visible_lines(&rows_at(&[r], Style { color: true }, now(), 200))[0]
+                .chars()
+                .count()
+        };
+        assert!(
+            width(undated) < width(dated),
+            "the date column has to disappear when nothing is dated"
+        );
+    }
+
+    #[test]
+    fn a_word_longer_than_the_column_is_split_rather_than_overhanging() {
+        let lines = wrap_text(&"x".repeat(30), 10);
+        assert!(
+            lines.iter().all(|l| l.chars().count() <= 10),
+            "got {lines:?}"
+        );
+        assert_eq!(lines.concat(), "x".repeat(30), "and nothing is lost");
     }
 
     /// Sorting now happens during the tree walk, so these go through `tree_rows` rather

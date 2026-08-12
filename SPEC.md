@@ -316,6 +316,11 @@ Near-monochrome, one accent color. What Linear would ship:
 - Dates relative and dim (`in 2d`, `3d ago`), red only when overdue.
 - Subtasks indented two spaces per level.
 - Generous left padding, a blank line between groups, nothing bold except the accent.
+- **The layout fits the terminal.** The text column is what is left after the gutter, the
+  date column and the ids, capped at 72 so the measure stays readable on a wide screen. A
+  title too long for it wraps at a word boundary and hangs under the text; the date and id
+  stay on the task's first line. The date column is not drawn at all when no task in the
+  list has a date. `PODRICK_COLUMNS` overrides the detected width.
 - **Everything above vanishes** when stdout is not a TTY or `NO_COLOR` is set — plain,
   parseable lines.
 
