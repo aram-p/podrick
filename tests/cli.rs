@@ -598,10 +598,11 @@ fn an_unknown_sort_key_in_the_config_file_fails_like_the_flag() {
     assert_eq!(order(&s.json(&["list", "--json"])), ["apple", "zebra"]);
 }
 
-/// A priority filter cuts across the tree. Every survivor must be one of the tasks that
-/// matched — never a stray child re-indented under whatever happened to sort above it.
+/// A priority filter keeps the tree. A p1 subtask of a p2 task is still that task's
+/// subtask, and rendering it at the same indent as unrelated p1 roots says otherwise.
+/// The parent comes along as context, exactly as it does for a text search.
 #[test]
-fn a_priority_filter_never_reparents_what_it_keeps() {
+fn a_priority_filter_keeps_matches_under_their_real_parent() {
     let s = Sandbox::new();
     s.add(&["zebra", "-p1"]);
     let parent = s.add(&["dee parent", "-p2"]);
@@ -614,23 +615,37 @@ fn a_priority_filter_never_reparents_what_it_keeps() {
         ["apple", "dee parent", "ekko child", "zebra"]
     );
 
-    // Filtered, the p2 parent is gone and its child sorts on its own merits.
+    // Filtered, the p2 parent stays — but only because a descendant matched.
     assert_eq!(
         order(&s.json(&["list", "-p", "p1", "--sort", "alpha", "--json"])),
-        ["apple", "ekko child", "zebra"],
-        "the child used to be dragged to the end, glued to an unrelated root"
+        ["apple", "dee parent", "ekko child", "zebra"]
     );
 
-    // The rendered tree must not imply a parent that was filtered away.
+    // And it is still rendered as the child's parent, not as a peer.
     let out = s.run(&["list", "-p", "p1", "--sort", "alpha", "--no-color"]);
     let text = String::from_utf8_lossy(&out.stdout);
-    for line in text.lines() {
-        let shown = line.split('\t').nth(3).unwrap_or("");
-        assert!(
-            !shown.starts_with(' '),
-            "no row may render as someone's subtask here: {line:?}"
-        );
-    }
+    let child = text
+        .lines()
+        .find(|l| l.contains("ekko child"))
+        .expect("the match is listed");
+    assert!(
+        child.split('\t').nth(3).unwrap_or("").starts_with(' '),
+        "the match must still render indented under its parent: {child:?}"
+    );
+}
+
+/// The parent is context, not a result — it must not drag its other children in with it.
+#[test]
+fn a_priority_filter_does_not_widen_to_the_whole_subtree() {
+    let s = Sandbox::new();
+    let parent = s.add(&["parent", "-p3"]);
+    s.add(&["urgent", "-p1", "--under", &parent]);
+    s.add(&["not urgent", "-p4", "--under", &parent]);
+
+    assert_eq!(
+        order(&s.json(&["list", "-p", "p1", "--json"])),
+        ["parent", "urgent"]
+    );
 }
 
 #[test]

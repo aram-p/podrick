@@ -344,6 +344,19 @@ fn open(cli: &Cli, ctx: &Ctx, may_create: bool) -> Result<Open> {
                 return Err(AppError::not_found("no task file, and creation declined"));
             }
         }
+        // Create it for real, now, before it is registered. Two reasons. The message
+        // below claims it exists, and it should not be a claim about the future. And the
+        // registry prunes entries whose file is missing, so a concurrent `pd` that read
+        // the registry in the window between "registered" and "first event appended"
+        // would prune this entry and write the registry back without it — which is
+        // exactly how one registration in eight went missing.
+        if let Some(dir) = resolved.path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&resolved.path)?;
         ctx.note(&format!(
             "created {} in {}",
             store::FILE_NAME,
@@ -599,6 +612,15 @@ fn effective_sort(cli_sort: Option<&str>, open: &Open) -> Result<Option<Sort>> {
     Ok(config::Config::load()?.sort)
 }
 
+/// How a priority reads back to the person who asked for it. `none` is a real selection —
+/// "tasks I never ranked" — not the absence of one.
+fn pri_label(p: Option<u8>) -> String {
+    match p {
+        Some(n) => format!("p{n}"),
+        None => "no priority".to_string(),
+    }
+}
+
 fn cmd_list(
     cli: &Cli,
     ctx: &Ctx,
@@ -616,23 +638,15 @@ fn cmd_list(
     };
 
     let key = effective_sort(sort, &open)?;
-    let mut rows = render::tree_rows(&open.store.state, all, filter.as_deref(), key);
-
-    if let Some(p) = priority {
-        let want = cli::parse_priority(p).map_err(AppError::usage)?;
-        rows.retain(|r| r.priority == want);
-        // Selecting by priority cuts across the tree, so the survivors are a worklist,
-        // not a tree — a kept child whose parent was filtered out would otherwise render
-        // indented under whichever unrelated row happened to precede it. Flatten and
-        // re-sort; the `path` column still reports where each task really lives.
-        for r in rows.iter_mut() {
-            r.depth = 1;
-            r.gap = false;
-        }
-        if let Some(key) = key {
-            render::sort_flat(&mut rows, key);
-        }
-    }
+    let want = priority
+        .map(|p| cli::parse_priority(p).map_err(AppError::usage))
+        .transpose()?;
+    // Both criteria go through the tree walk rather than being applied to the flattened
+    // rows afterwards. Filtering after the walk cannot keep a matching task attached to a
+    // parent that did not match, and a detached child renders indented under whatever row
+    // happens to precede it.
+    let selection = render::Filter::text(filter.as_deref()).with_priority(want);
+    let rows = render::tree_rows(&open.store.state, all, &selection, key);
 
     if ctx.json {
         let paths = open.store.state.paths();
@@ -646,9 +660,13 @@ fn cmd_list(
     }
 
     if rows.is_empty() {
-        let msg = match &filter {
-            Some(f) => format!("nothing matching {f:?}"),
-            None => "nothing open".to_string(),
+        // Name whichever criteria were actually given, so an empty result never reads as
+        // "you have nothing to do" when it means "nothing matched what you asked for".
+        let msg = match (&filter, want) {
+            (Some(f), Some(p)) => format!("nothing matching {f:?} at {}", pri_label(p)),
+            (Some(f), None) => format!("nothing matching {f:?}"),
+            (None, Some(p)) => format!("nothing at {}", pri_label(p)),
+            (None, None) => "nothing open".to_string(),
         };
         println!("{}", ctx.style.dim(&msg));
         return Ok(());
@@ -1399,7 +1417,7 @@ fn cmd_all(ctx: &Ctx) -> Result<()> {
         };
         // Each file is shown in its own configured order, so `pd all` and `pd list` never
         // disagree about how the same project is sorted.
-        let rows = render::tree_rows(&st.state, false, None, e.sort);
+        let rows = render::tree_rows(&st.state, false, &render::Filter::default(), e.sort);
         if rows.is_empty() {
             continue;
         }

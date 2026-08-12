@@ -167,34 +167,67 @@ fn due_visible_len(due: &Option<String>, now: DateTime<Local>) -> usize {
     }
 }
 
+/// What a task has to match to be listed.
+///
+/// Both criteria behave the same way, which is the point: a task that fails is still shown
+/// when a descendant passes. A filtered view stays a tree rather than orphaning its own
+/// results under whichever unrelated row happens to precede them.
+#[derive(Default, Clone)]
+pub struct Filter {
+    /// Case-insensitive substring of the task text.
+    needle: Option<String>,
+    /// Exact priority, where the outer `Option` is "was a priority asked for" and the
+    /// inner one is the task's own unset-able priority.
+    priority: Option<Option<u8>>,
+}
+
+impl Filter {
+    pub fn text(needle: Option<&str>) -> Filter {
+        Filter {
+            needle: needle.map(str::to_lowercase),
+            priority: None,
+        }
+    }
+
+    pub fn with_priority(mut self, p: Option<Option<u8>>) -> Filter {
+        self.priority = p;
+        self
+    }
+
+    fn admits(&self, task: &Task) -> bool {
+        let text_ok = match &self.needle {
+            None => true,
+            Some(n) => task.text.to_lowercase().contains(n.as_str()),
+        };
+        let pri_ok = match self.priority {
+            None => true,
+            Some(want) => task.priority == want,
+        };
+        text_ok && pri_ok
+    }
+}
+
 /// Build rows for the default tree view.
 ///
 /// `sort` orders siblings **during** the walk, while the tree is still a tree. An earlier
 /// version flattened first and then tried to rediscover the structure by reading depth
 /// adjacency out of the flat list, which mistook "a depth-2 row after a depth-1 row" for
-/// "a child of it" and glued unrelated subtrees together.
+/// "a child of it" and glued unrelated subtrees together. `filter` is applied in the same
+/// walk, and for the same reason.
 pub fn tree_rows(
     state: &State,
     include_all: bool,
-    filter: Option<&str>,
+    filter: &Filter,
     sort: Option<Sort>,
 ) -> Vec<Row> {
     let paths = state.paths();
     let mut rows = Vec::new();
-    let needle = filter.map(|f| f.to_lowercase());
-
-    fn matches(text: &str, needle: &Option<String>) -> bool {
-        match needle {
-            None => true,
-            Some(n) => text.to_lowercase().contains(n.as_str()),
-        }
-    }
 
     // A blank line separates subtrees, but only where one actually exists. Flat lists
     // stay tight — the default view of ten items has to fit on a glance.
     let mut prev_had_children = false;
     for root in ordered(state.open_roots(), sort) {
-        let mut subtree = collect(state, root, 1, &paths, &needle, sort);
+        let mut subtree = collect(state, root, 1, &paths, filter, sort);
         if subtree.is_empty() {
             continue;
         }
@@ -210,7 +243,7 @@ pub fn tree_rows(
         let mut closed: Vec<&crate::state::Task> = state
             .tasks
             .iter()
-            .filter(|t| !t.state.is_open() && matches(&t.text, &needle))
+            .filter(|t| !t.state.is_open() && filter.admits(t))
             .collect();
         closed.sort_by_key(|t| t.order);
         for (i, t) in closed.iter().enumerate() {
@@ -235,22 +268,17 @@ fn collect(
     task: &crate::state::Task,
     depth: usize,
     paths: &crate::state::Paths,
-    needle: &Option<String>,
+    filter: &Filter,
     sort: Option<Sort>,
 ) -> Vec<Row> {
     let children: Vec<Row> = ordered(state.open_children(&task.id), sort)
         .into_iter()
-        .flat_map(|c| collect(state, c, depth + 1, paths, needle, sort))
+        .flat_map(|c| collect(state, c, depth + 1, paths, filter, sort))
         .collect();
 
-    let self_matches = match needle {
-        None => true,
-        Some(n) => task.text.to_lowercase().contains(n.as_str()),
-    };
-
     // A parent is kept when it matches, or when any descendant does — otherwise a
-    // search would orphan its results.
-    if !self_matches && children.is_empty() {
+    // filtered view would orphan its own results.
+    if !filter.admits(task) && children.is_empty() {
         return vec![];
     }
 
@@ -333,12 +361,6 @@ fn cmp_tasks(a: &Task, b: &Task, key: Sort) -> std::cmp::Ordering {
     cmp_keys(&a.into(), &b.into(), key)
 }
 
-/// Order an already-flattened list. Used only by the priority filter, which selects tasks
-/// out of the tree and so has no sibling structure left to preserve.
-pub fn sort_flat(rows: &mut [Row], key: Sort) {
-    rows.sort_by(|a, b| cmp_keys(&a.into(), &b.into(), key));
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,7 +440,7 @@ mod tests {
             ("bbb", "child of b", Some("aaa"), None),
             ("ccc", "a-parent", None, Some(1)),
         ]);
-        let rs = tree_rows(&st, false, None, Some(Sort::Priority));
+        let rs = tree_rows(&st, false, &Filter::default(), Some(Sort::Priority));
         assert_eq!(rs[0].id, "ccc", "p1 root sorts first");
         assert_eq!(rs[1].id, "aaa");
         assert_eq!(rs[2].id, "bbb", "the child stayed with its parent");
@@ -428,7 +450,7 @@ mod tests {
     #[test]
     fn alpha_sort_orders_siblings() {
         let st = state_of(&[("aaa", "zebra", None, None), ("bbb", "apple", None, None)]);
-        let rs = tree_rows(&st, false, None, Some(Sort::Alpha));
+        let rs = tree_rows(&st, false, &Filter::default(), Some(Sort::Alpha));
         assert_eq!(rs[0].text, "apple");
     }
 
@@ -442,7 +464,7 @@ mod tests {
             ("ccc", "ekko child", Some("bbb"), Some(1)),
             ("ddd", "apple", None, Some(1)),
         ]);
-        let rs = tree_rows(&st, false, None, Some(Sort::Alpha));
+        let rs = tree_rows(&st, false, &Filter::default(), Some(Sort::Alpha));
 
         let order: Vec<&str> = rs.iter().map(|r| r.text.as_str()).collect();
         assert_eq!(order, ["apple", "dee parent", "ekko child", "zebra"]);
@@ -453,13 +475,65 @@ mod tests {
         assert_eq!(rs[pos - 1].id, "bbb");
     }
 
+    /// A priority filter keeps a non-matching parent as context, exactly as a text filter
+    /// does. Without it a p1 subtask renders at the same indent as unrelated p1 roots,
+    /// which reads as "these are peers" when they are not.
     #[test]
-    fn a_flat_sort_orders_what_the_priority_filter_selected() {
-        let mut rs = vec![
-            row("aaa", "zebra", 1, Some(1)),
-            row("bbb", "apple", 1, Some(1)),
-        ];
-        sort_flat(&mut rs, Sort::Alpha);
-        assert_eq!(rs[0].text, "apple");
+    fn a_priority_filter_keeps_the_parent_that_did_not_match() {
+        let st = state_of(&[
+            ("aaa", "ship the migration", None, Some(3)),
+            ("bbb", "backfill in batches", Some("aaa"), Some(1)),
+            ("ccc", "unrelated", None, Some(4)),
+        ]);
+        let f = Filter::default().with_priority(Some(Some(1)));
+        let rs = tree_rows(&st, false, &f, None);
+
+        let order: Vec<&str> = rs.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(order, ["ship the migration", "backfill in batches"]);
+        assert_eq!(rs[1].depth, 2, "the match is still shown as a child");
+        assert_eq!(rs[0].depth, 1, "and its parent is still its parent");
+    }
+
+    /// The context is context, not a result: a parent kept only to hold up a match must
+    /// not drag in its other children.
+    #[test]
+    fn a_kept_parent_does_not_bring_its_non_matching_siblings() {
+        let st = state_of(&[
+            ("aaa", "parent", None, Some(3)),
+            ("bbb", "urgent", Some("aaa"), Some(1)),
+            ("ccc", "not urgent", Some("aaa"), Some(4)),
+        ]);
+        let f = Filter::default().with_priority(Some(Some(1)));
+        let rs = tree_rows(&st, false, &f, None);
+
+        let order: Vec<&str> = rs.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(order, ["parent", "urgent"]);
+    }
+
+    /// `--priority none` selects the tasks nobody ranked. It is a real query, so it must
+    /// not be confused with "no priority filter was given".
+    #[test]
+    fn filtering_for_unset_priority_is_a_real_query() {
+        let st = state_of(&[
+            ("aaa", "ranked", None, Some(1)),
+            ("bbb", "unranked", None, None),
+        ]);
+        let f = Filter::default().with_priority(Some(None));
+        let rs = tree_rows(&st, false, &f, None);
+        assert_eq!(rs.len(), 1);
+        assert_eq!(rs[0].text, "unranked");
+    }
+
+    #[test]
+    fn text_and_priority_filters_both_have_to_pass() {
+        let st = state_of(&[
+            ("aaa", "write the parser", None, Some(1)),
+            ("bbb", "write the docs", None, Some(3)),
+            ("ccc", "read the parser", None, Some(1)),
+        ]);
+        let f = Filter::text(Some("write")).with_priority(Some(Some(1)));
+        let rs = tree_rows(&st, false, &f, None);
+        assert_eq!(rs.len(), 1);
+        assert_eq!(rs[0].text, "write the parser");
     }
 }

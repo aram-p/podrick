@@ -25,6 +25,12 @@ caller. A log written by any older `pd` must always still replay.
   overwrote each other's registrations. Eight concurrent `pd --here add` in eight repos
   left **one** registration of eight; it is now eight of eight. `save` re-reads inside the
   lock, keeps entries it did not know about, and renames a temp file into place.
+- **The registry could still lose an entry**, less often, after the locking fix above.
+  `read` prunes entries whose task file is missing, and the file was registered *before*
+  it was created — so a concurrent `pd` reading the registry in that window pruned the
+  new entry and wrote the registry back without it. A file created by `--here` is now
+  created on disk at the moment it is announced, before it is registered. The test for
+  this failed roughly one run in five; it now passes twenty in twenty.
 - **A parent link could close a loop at replay**, hanging or blowing the stack on a log
   that a well-behaved `pd` would never write but a corrupted or hand-forged one could.
   Both `moved` and two `created` events naming each other are now refused at replay, and
@@ -48,9 +54,12 @@ caller. A log written by any older `pd` must always still replay.
   discard a whole entry over one bad field.
 - `pd all` renders each file in that file's own configured sort, so it can no longer
   disagree with `pd list` about the same project.
-- Priority-filtered output is flat rather than nested — a parent that does not match the
-  filter is no longer shown as scaffolding. The `path` column still says where each task
-  lives.
+- Priority filtering happens inside the tree walk, alongside the text filter, so a match
+  keeps its real parent as context instead of being re-indented under whatever row sorted
+  above it. The two filters now behave identically and compose: `pd list -p1 parser`
+  requires both. A parent kept as context does not drag its other children in.
+- An empty result names what was actually asked for — `nothing at p2`, `nothing matching
+  "parser" at p1` — rather than reporting `nothing open` when there is plenty open.
 - The task file's `.gitignore` entry is the glob `.podrick*`, so the lock and the archive
   are covered too rather than sitting in `git status` forever.
 - A task file found through discovery is announced only when the command is about to
