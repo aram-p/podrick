@@ -27,12 +27,26 @@ $ pd log a7f
 
 ## Install
 
+Nothing is released yet, so the way in is from source. Needs Rust 1.82 or newer
+([rustup](https://rustup.rs)):
+
 ```sh
-cargo install podrick          # crates.io
-brew install aram-p/tap/podrick
+cargo install --git https://github.com/aram-p/podrick
 ```
 
-The binary is `pd`.
+That puts a `pd` binary in `~/.cargo/bin`, which has to be on your `PATH` — rustup normally
+adds it, but not if it was installed with `--no-modify-path`:
+
+```sh
+command -v pd || export PATH="$HOME/.cargo/bin:$PATH"   # and add it to your shell rc
+pd --version
+```
+
+To update, run the same command again. To uninstall, `cargo uninstall podrick`.
+
+Once a `v0.1.0` tag is pushed, `cargo install podrick` and prebuilt binaries for macOS and
+Linux (arm64 and x86-64) become available too — the release workflow is written and waiting
+on the tag. There is no Homebrew tap.
 
 ## Use
 

@@ -40,10 +40,22 @@ jobs:
         with:
           files: pd-${{ matrix.target }}.tar.gz
 
+  # Skipped rather than failed when no token is configured: the binaries above are the
+  # release, and a missing crates.io token should not turn a good tag red.
   crates-io:
     needs: binaries
+    if: ${{ github.repository == 'aram-p/podrick' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - name: Publish
+        env:
+          TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::warning::CARGO_REGISTRY_TOKEN is not set — skipping crates.io publish."
+            echo "Set it with: gh secret set CARGO_REGISTRY_TOKEN"
+            exit 0
+          fi
+          cargo publish --locked --token "$TOKEN"

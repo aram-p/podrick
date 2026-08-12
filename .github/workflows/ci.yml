@@ -20,3 +20,14 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --all
+
+  # `rust-version` in Cargo.toml is a promise to anyone running `cargo install`, and the
+  # stable job above cannot keep it — stable accepts things 1.82 does not. Build only:
+  # the dev-dependencies pull in newer requirements than the binary itself needs.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.82.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked
