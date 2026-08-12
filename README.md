@@ -27,26 +27,33 @@ $ pd log a7f
 
 ## Install
 
-Nothing is released yet, so the way in is from source. Needs Rust 1.85 or newer
-([rustup](https://rustup.rs)):
+**A prebuilt binary**, no toolchain required — macOS and Linux, arm64 and x86-64:
+
+```sh
+curl -sSL https://github.com/aram-p/podrick/releases/latest/download/pd-aarch64-apple-darwin.tar.gz | tar xz
+sudo install -m 755 pd /usr/local/bin/pd
+```
+
+Swap the filename for `pd-x86_64-apple-darwin`, `pd-x86_64-unknown-linux-gnu`, or
+`pd-aarch64-unknown-linux-gnu`. The binaries are unsigned, so macOS will quarantine one
+fetched by a browser — `xattr -d com.apple.quarantine pd` clears it. Checksums are on the
+[release page](https://github.com/aram-p/podrick/releases/latest).
+
+**From source**, needing Rust 1.85 or newer ([rustup](https://rustup.rs)):
 
 ```sh
 cargo install --git https://github.com/aram-p/podrick
 ```
 
-That puts a `pd` binary in `~/.cargo/bin`, which has to be on your `PATH` — rustup normally
-adds it, but not if it was installed with `--no-modify-path`:
+That puts `pd` in `~/.cargo/bin`, which has to be on your `PATH` — rustup normally adds it,
+but not if it was installed with `--no-modify-path`:
 
 ```sh
 command -v pd || export PATH="$HOME/.cargo/bin:$PATH"   # and add it to your shell rc
 pd --version
 ```
 
-To update, run the same command again. To uninstall, `cargo uninstall podrick`.
-
-Once a `v0.1.0` tag is pushed, `cargo install podrick` and prebuilt binaries for macOS and
-Linux (arm64 and x86-64) become available too — the release workflow is written and waiting
-on the tag. There is no Homebrew tap.
+Not on crates.io or Homebrew yet.
 
 ## Use
 
