@@ -3,12 +3,21 @@ name: release
 on:
   push:
     tags: ["v*"]
+  # Republish the formula for a tag that is already out, without moving the tag or
+  # rebuilding its binaries. The way to fix a formula, and the way to prove the tap job
+  # works without cutting a release for the sake of it.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to regenerate the Homebrew formula for"
+        required: true
 
 permissions:
   contents: write
 
 jobs:
   binaries:
+    if: ${{ github.event_name == 'push' }}
     strategy:
       matrix:
         include:
@@ -45,14 +54,16 @@ jobs:
   # nothing else. Absent, the job warns and skips, same as crates.io below.
   tap:
     needs: binaries
-    if: ${{ github.repository == 'aram-p/podrick' }}
+    # `always()` so a dispatch, where `binaries` is skipped rather than run, still reaches
+    # this — but never after a build that actually failed.
+    if: ${{ always() && needs.binaries.result != 'failure' && github.repository == 'aram-p/podrick' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Update the Homebrew tap
         env:
           TOKEN: ${{ secrets.TAP_TOKEN }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           if [ -z "$TOKEN" ]; then
             echo "::warning::TAP_TOKEN is not set — skipping the Homebrew tap update."
@@ -81,7 +92,7 @@ jobs:
   # release, and a missing crates.io token should not turn a good tag red.
   crates-io:
     needs: binaries
-    if: ${{ github.repository == 'aram-p/podrick' }}
+    if: ${{ github.event_name == 'push' && github.repository == 'aram-p/podrick' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
