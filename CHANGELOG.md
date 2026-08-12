@@ -24,6 +24,24 @@ caller. A log written by any older `pd` must always still replay.
   its long help, where that says more than the one-line `about`. The schema claims to be
   the whole API, and a command like `batch` whose contract is an input format was not
   describable in one line. Additive; existing fields are unchanged.
+
+### Changed
+
+- `pd undo` says "and 3 change(s)" for a batch of unrelated edits and keeps "subtask(s)"
+  for a cascade, rather than calling every grouped event a subtask.
+
+## 0.1.0
+
+First release. Append-only JSONL ledger, priorities `p1`–`p4`, subtasks to four levels,
+natural-language dates with times, per-directory task files with registry-backed discovery,
+`--json` on every command, and `pd --help --json` for the full command schema.
+
+The rest of this section is development history — work done between the initial commit and
+the tag, so no released version ever had the old behaviour. It is kept because the
+reasoning is worth having.
+
+### Added
+
 - `pd list --all` gained the short form **`-a`**. Because `list` is the implied command,
   argv normalisation now inserts it at the front rather than in front of the first
   positional, so `pd -a` and `pd -a <filter>` work as well as `pd list -a` — `list`'s own
@@ -55,8 +73,6 @@ caller. A log written by any older `pd` must always still replay.
 
 ### Changed
 
-- `pd undo` says "and 3 change(s)" for a batch of unrelated edits and keeps "subtask(s)"
-  for a cascade, rather than calling every grouped event a subtask.
 - **`pd config <key> <value> --here` is now `--project`.** `--here` is a global flag
   meaning "skip discovery and use this directory's own file", and one token cannot carry
   both meanings — spelling them the same made `pd config sort … --here` impossible in any
@@ -83,9 +99,3 @@ caller. A log written by any older `pd` must always still replay.
 - Notices are styled for terminals: an indented `↳` in the accent colour, with the project
   directory shortened (`~/Dev/podrick` rather than the full path to the dotfile). Piped and
   `NO_COLOR` output keeps the greppable `pd: ` prefix unchanged.
-
-## 0.1.0
-
-First release. Append-only JSONL ledger, priorities `p1`–`p4`, subtasks to four levels,
-natural-language dates with times, per-directory task files with registry-backed discovery,
-`--json` on every command, and `pd --help --json` for the full command schema.
