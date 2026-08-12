@@ -339,13 +339,12 @@ Public repo. What is actually live:
 ```
 brew install aram-p/tap/podrick                         # Homebrew tap
 curl -sSL .../releases/latest/download/pd-<target>.tar.gz | tar xz
+cargo install podrick                                   # crates.io
 cargo install --git https://github.com/aram-p/podrick   # tracks main
 ```
 
-Not live: **crates.io**, which needs `CARGO_REGISTRY_TOKEN` set as a repository secret —
-until it is, that job warns and skips rather than reddening the tag. And **homebrew-core**,
-whose notability bar (75 stars, or 30 forks or watchers) this does not clear; the tap is
-the answer until it might.
+Not live: **homebrew-core**, whose notability bar (75 stars, or 30 forks or watchers) this
+does not clear; the tap is the answer until it might.
 
 Release CI (GitHub Actions, tag-triggered) cross-compiles for `aarch64-apple-darwin`,
 `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`, and `aarch64-unknown-linux-gnu`, and
@@ -354,7 +353,8 @@ from those published assets — reading the checksums off what was uploaded, nev
 local build — and pushes it to `aram-p/homebrew-tap`. It needs `TAP_TOKEN`, a fine-grained
 PAT with `contents:write` on the tap and nothing else, because `GITHUB_TOKEN` is scoped to
 this repository alone. The workflow also takes a manual dispatch with a tag, so a formula
-can be republished without moving a tag.
+can be republished without moving a tag. A third job publishes to crates.io, which needs
+`CARGO_REGISTRY_TOKEN`; absent, it warns and skips rather than reddening the tag.
 
 Binary size target: under 2 MB stripped, with `opt-level="z"`, LTO, `codegen-units=1`, and
 `panic="abort"`. Currently 805 KB on `aarch64-apple-darwin`.

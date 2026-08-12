@@ -47,10 +47,10 @@ Swap the filename for `pd-x86_64-apple-darwin`, `pd-x86_64-unknown-linux-gnu`, o
 fetched by a browser — `xattr -d com.apple.quarantine pd` clears it. Checksums are on the
 [release page](https://github.com/aram-p/podrick/releases/latest).
 
-**From source**, needing Rust 1.85 or newer ([rustup](https://rustup.rs)):
+**From crates.io**, needing Rust 1.85 or newer ([rustup](https://rustup.rs)):
 
 ```sh
-cargo install --git https://github.com/aram-p/podrick
+cargo install podrick        # or --git https://github.com/aram-p/podrick to track main
 ```
 
 That puts `pd` in `~/.cargo/bin`, which has to be on your `PATH` — rustup normally adds it,
@@ -61,8 +61,7 @@ command -v pd || export PATH="$HOME/.cargo/bin:$PATH"   # and add it to your she
 pd --version
 ```
 
-Not on crates.io or in homebrew-core yet — core wants a project with rather more stars
-than this one has.
+Not in homebrew-core — core wants a project with rather more stars than this one has.
 
 ## Use
 
