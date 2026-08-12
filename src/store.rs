@@ -500,35 +500,34 @@ pub fn compact(path: &Path, snapshot_event: &Event) -> Result<usize> {
 // ---------------------------------------------------------------------------
 
 /// A short permanent id. Ambiguous glyphs (l, 1, 0, o) are left out of the alphabet.
+///
+/// The randomness comes from `RandomState`, which the standard library seeds per instance
+/// from the OS. A previous version also hashed `SystemTime::now().elapsed()` — the gap
+/// between capturing an instant and asking how long ago it was, which measures zero — so
+/// the ids were sound but not for the reason the code claimed.
+///
+/// Widening is a continuation of the same loop rather than a separate escape hatch: three
+/// characters give 32^3 ids, and a file that has genuinely exhausted them still needs the
+/// next id to be unique, not merely longer.
 pub fn new_id(taken: &dyn Fn(&str) -> bool) -> String {
-    for _ in 0..10_000 {
-        let mut h = RandomState::new().build_hasher();
-        h.write_u64(
-            std::time::SystemTime::now()
-                .elapsed()
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0),
-        );
-        let mut n = h.finish();
-        let mut id = String::with_capacity(3);
-        for _ in 0..3 {
-            id.push(ID_ALPHABET[(n % ID_ALPHABET.len() as u64) as usize] as char);
-            n /= ID_ALPHABET.len() as u64;
-        }
-        if !taken(&id) {
-            return id;
+    let mut last = String::new();
+    for len in 3..=8 {
+        for _ in 0..1_000 {
+            let mut n = RandomState::new().build_hasher().finish();
+            let mut id = String::with_capacity(len);
+            for _ in 0..len {
+                id.push(ID_ALPHABET[(n % ID_ALPHABET.len() as u64) as usize] as char);
+                n /= ID_ALPHABET.len() as u64;
+            }
+            if !taken(&id) {
+                return id;
+            }
+            last = id;
         }
     }
-    // Alphabet exhausted at 3 chars — widen rather than fail.
-    let mut id = String::new();
-    let mut h = RandomState::new().build_hasher();
-    h.write_u64(0);
-    let mut n = h.finish();
-    for _ in 0..6 {
-        id.push(ID_ALPHABET[(n % ID_ALPHABET.len() as u64) as usize] as char);
-        n /= ID_ALPHABET.len() as u64;
-    }
-    id
+    // 48,000 draws up to eight characters all collided. That is not a namespace problem,
+    // so a longer id would not help either; hand back the last one rather than loop.
+    last
 }
 
 #[cfg(test)]
@@ -569,5 +568,20 @@ mod tests {
             assert!(!seen.contains(&id));
             seen.push(id);
         }
+    }
+
+    /// The widening path used to hash a constant and return without consulting `taken` —
+    /// the one branch that exists to resolve a collision was the one that could cause one.
+    #[test]
+    fn a_widened_id_is_still_checked_for_collisions() {
+        // Every three-character id is spoken for, so the only way out is a longer one.
+        let taken = |s: &str| s.len() == 3;
+        let id = new_id(&taken);
+        assert!(id.len() > 3, "should have widened, got {id:?}");
+        assert!(!taken(&id), "the widened id was handed back unchecked");
+        assert!(
+            !id.contains(['l', '1', '0', 'o']),
+            "ambiguous glyph in {id}"
+        );
     }
 }
