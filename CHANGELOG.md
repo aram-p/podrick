@@ -8,7 +8,7 @@ Changes to the three versioned contracts — JSON payloads, exit codes, and the 
 are always listed under their own heading, because those are the ones that can break a
 caller. A log written by any older `pd` must always still replay.
 
-## Unreleased
+## 0.1.1
 
 ### Added
 
