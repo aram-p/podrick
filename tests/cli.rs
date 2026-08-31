@@ -1009,3 +1009,436 @@ fn order(v: &Value) -> Vec<String> {
         .map(|t| t["text"].as_str().unwrap().to_string())
         .collect()
 }
+
+// ---------------------------------------------------------------------------
+// People
+// ---------------------------------------------------------------------------
+
+/// The people currently on a task, straight off the JSON contract — display forms, which
+/// is what the payload carries.
+fn people_of(v: &Value) -> Vec<String> {
+    v["people"]
+        .as_array()
+        .expect("a task always carries `people`")
+        .iter()
+        .map(|p| p.as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn linking_a_person_is_idempotent() {
+    let s = Sandbox::new();
+    let id = s.add(&["order the brake pads"]);
+
+    let v = s.json(&["who", &id, "meri", "--json"]);
+    assert_eq!(people_of(&v["task"]), ["Meri"], "shown capitalised");
+    assert_eq!(v["changed"].as_array().unwrap().len(), 1);
+
+    // Again, and in another spelling: one person, one link, and nothing new in the log.
+    let again = s.json(&["who", &id, "MERI", "--json"]);
+    assert_eq!(people_of(&again["task"]), ["Meri"]);
+    assert!(
+        again["changed"].as_array().unwrap().is_empty(),
+        "a re-link appends nothing"
+    );
+    assert_eq!(
+        again["seq"], v["seq"],
+        "and so does not move the log forward"
+    );
+
+    let linked = s.json(&["log", "--json"])["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["ev"] == "linked")
+        .count();
+    assert_eq!(linked, 1, "exactly one `linked` event exists");
+}
+
+#[test]
+fn a_task_carries_many_people_and_gives_them_up_one_at_a_time() {
+    let s = Sandbox::new();
+    let id = s.add(&["chase the car-parts supplier"]);
+    s.run(&["who", &id, "meri", "gegham", "anna"]);
+
+    let v = s.json(&["list", "--json"]);
+    assert_eq!(people_of(&v["tasks"][0]), ["Meri", "Gegham", "Anna"]);
+
+    let after = s.json(&["who", &id, "--remove", "gegham", "--json"]);
+    assert_eq!(people_of(&after["task"]), ["Meri", "Anna"]);
+    assert_eq!(after["action"], "unlinked");
+
+    // Unlinking someone who was never there is a no-op, not an error.
+    let noop = s.run(&["who", &id, "--remove", "suren"]);
+    assert!(noop.status.success());
+    assert_eq!(
+        people_of(&s.json(&["list", "--json"])["tasks"][0]),
+        ["Meri", "Anna"]
+    );
+}
+
+#[test]
+fn names_are_trimmed_and_collapsed_but_keep_their_capitals() {
+    let s = Sandbox::new();
+    let id = s.add(&["file the insurance claim"]);
+    s.run(&["who", &id, "  Meri   Sargsyan "]);
+    assert_eq!(
+        people_of(&s.json(&["list", "--json"])["tasks"][0]),
+        ["Meri Sargsyan"]
+    );
+}
+
+/// The first spelling wins, so a name someone took care over is not undone by the next
+/// person to type it in a hurry. Title-casing at render time would mangle all three of
+/// these, which is why the display form is stored rather than derived.
+#[test]
+fn a_typed_capitalisation_is_kept_verbatim_and_never_re_cased() {
+    let s = Sandbox::new();
+    for (i, name) in ["McDonald", "de Vries", "O'Brien"].iter().enumerate() {
+        let id = s.add(&[&format!("task {i}")]);
+        s.run(&["who", &id, name]);
+        // A second link in another spelling finds the same person and changes nothing.
+        s.run(&["who", &id, &name.to_lowercase()]);
+        assert_eq!(
+            people_of(&s.json(&["list", "--json"])["tasks"][i]),
+            [*name],
+            "the first spelling stands"
+        );
+    }
+    let names: Vec<String> = s.json(&["people", "--json"])["people"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["name"].as_str().unwrap().to_string())
+        .collect();
+    // Ties are broken on the folded key, so a capital letter never moves anybody:
+    // "de vries" sorts before "mcdonald" before "o'brien".
+    assert_eq!(names, ["de Vries", "McDonald", "O'Brien"]);
+}
+
+/// Only the display changes, so every spelling still finds them.
+#[test]
+fn matching_ignores_case_however_the_name_is_shown() {
+    let s = Sandbox::new();
+    let id = s.add(&["order the brake pads"]);
+    s.run(&["who", &id, "McDonald"]);
+    for spelling in ["McDonald", "mcdonald", "MCDONALD", "  McDonald  "] {
+        let v = s.json(&["list", "--person", spelling, "--json"]);
+        assert_eq!(
+            v["tasks"].as_array().unwrap().len(),
+            1,
+            "{spelling:?} has to find them"
+        );
+        assert_eq!(people_of(&v["tasks"][0]), ["McDonald"]);
+    }
+}
+
+/// Fixing a capitalisation is a rename, and it must not be swallowed as a no-op: the
+/// folded identity does not move, but the spelling does.
+#[test]
+fn a_rename_that_only_changes_the_case_still_lands() {
+    let s = Sandbox::new();
+    let id = s.add(&["order the brake pads"]);
+    s.run(&["who", &id, "mcdonald"]);
+    assert_eq!(
+        people_of(&s.json(&["list", "--json"])["tasks"][0]),
+        ["Mcdonald"],
+        "the lower-case default gets it wrong, which is what the rename is for"
+    );
+
+    let v = s.json(&["people", "rename", "mcdonald", "McDonald", "--json"]);
+    assert_eq!(v["to"], "McDonald");
+    assert_eq!(
+        people_of(&s.json(&["list", "--json"])["tasks"][0]),
+        ["McDonald"]
+    );
+    // Still one person, still matched by any spelling.
+    assert_eq!(
+        s.json(&["people", "--json"])["people"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        s.json(&["list", "--person", "MCDONALD", "--json"])["tasks"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // Once it is pinned, saying it again is the no-op it looks like.
+    let out = s.run(&["people", "rename", "mcdonald", "McDonald"]);
+    assert_eq!(out.status.code(), Some(2));
+
+    // And undo puts the old spelling back, not merely the old identity.
+    s.run(&["undo"]);
+    assert_eq!(
+        people_of(&s.json(&["list", "--json"])["tasks"][0]),
+        ["Mcdonald"]
+    );
+}
+
+/// A ledger written by a build that had no display forms at all. Every name in it is
+/// folded, and it has to come back reading like a name.
+#[test]
+fn a_ledger_without_display_forms_replays_capitalised() {
+    let s = Sandbox::new();
+    let log = concat!(
+        r#"{"v":1,"seq":1,"ts":"2026-01-01T10:00:00+04:00","actor":"cli","ev":"created","id":"a7f","data":{"text":"order the brake pads"}}"#,
+        "
+",
+        r#"{"v":1,"seq":2,"ts":"2026-01-01T10:01:00+04:00","actor":"cli","ev":"linked","id":"a7f","data":{"person":"meri sargsyan"}}"#,
+        "
+",
+        r#"{"v":1,"seq":3,"ts":"2026-01-01T10:02:00+04:00","actor":"cli","ev":"linked","id":"a7f","data":{"person":"gegham"}}"#,
+        "
+",
+        r#"{"v":1,"seq":4,"ts":"2026-01-01T10:03:00+04:00","actor":"cli","ev":"renamed","id":"","data":{"from":"gegham","to":"anna"}}"#,
+        "
+",
+    );
+    let path = s.path().join("old.podrick");
+    std::fs::write(&path, log).unwrap();
+    let file = path.to_str().unwrap();
+
+    let v = s.json(&["-f", file, "list", "--json"]);
+    assert_eq!(people_of(&v["tasks"][0]), ["Meri Sargsyan", "Anna"]);
+    let people = s.json(&["-f", file, "people", "--json"])["people"].clone();
+    assert_eq!(people[0]["name"], "Anna");
+    assert_eq!(people[1]["name"], "Meri Sargsyan");
+
+    // And it keeps working: a new link in a chosen spelling pins that spelling.
+    s.run(&["-f", file, "who", "a7f", "McDonald"]);
+    assert_eq!(
+        people_of(&s.json(&["-f", file, "list", "--json"])["tasks"][0]),
+        ["Meri Sargsyan", "Anna", "McDonald"]
+    );
+}
+
+#[test]
+fn the_people_list_is_derived_and_ordered_by_what_is_open() {
+    let s = Sandbox::new();
+    let a = s.add(&["brake pads"]);
+    let b = s.add(&["wing mirror"]);
+    let c = s.add(&["service book"]);
+    let d = s.add(&["winter tyres"]);
+    let e = s.add(&["headlight bulb"]);
+    s.run(&["who", &a, "meri"]);
+    s.run(&["who", &e, "meri"]);
+    s.run(&["who", &b, "meri"]);
+    s.run(&["who", &c, "meri"]);
+    s.run(&["who", &d, "gegham"]);
+    s.run(&["done", &b]);
+    s.run(&["drop", &c]);
+
+    // Busiest first. The dropped task counts towards neither total — "decided against
+    // this" is not work outstanding and not work done.
+    let people = s.json(&["people", "--json"])["people"].clone();
+    assert_eq!(people[0]["name"], "Meri");
+    assert_eq!(people[0]["open"], 2);
+    assert_eq!(people[0]["done"], 1);
+    assert_eq!(people[1]["name"], "Gegham");
+    assert_eq!(people[1]["open"], 1);
+    assert_eq!(people[1]["done"], 0);
+    assert_eq!(
+        people.as_array().unwrap().len(),
+        2,
+        "nobody exists but the people some task names"
+    );
+}
+
+#[test]
+fn renaming_a_person_carries_every_link_with_it() {
+    let s = Sandbox::new();
+    let a = s.add(&["brake pads"]);
+    let b = s.add(&["wing mirror"]);
+    s.run(&["who", &a, "meri"]);
+    s.run(&["who", &b, "meri", "gegham"]);
+
+    let v = s.json(&["people", "rename", "meri", "Meri Sargsyan", "--json"]);
+    assert_eq!(v["tasks"], 2);
+    assert_eq!(v["from"], "Meri");
+    assert_eq!(v["to"], "Meri Sargsyan");
+
+    let tasks = s.json(&["list", "--json"])["tasks"].clone();
+    assert_eq!(people_of(&tasks[0]), ["Meri Sargsyan"]);
+    assert_eq!(people_of(&tasks[1]), ["Meri Sargsyan", "Gegham"]);
+
+    // Renaming onto a name that is already there merges rather than duplicating, and the
+    // spelling typed for the target is the one that stands.
+    s.run(&["people", "rename", "gegham", "meri sargsyan"]);
+    let tasks = s.json(&["list", "--json"])["tasks"].clone();
+    assert_eq!(people_of(&tasks[1]), ["Meri Sargsyan"]);
+
+    let out = s.run(&["people", "rename", "nobody", "somebody"]);
+    assert_eq!(out.status.code(), Some(1), "an unknown name is not found");
+}
+
+#[test]
+fn removing_a_person_unlinks_them_everywhere_as_one_action() {
+    let s = Sandbox::new();
+    let a = s.add(&["brake pads"]);
+    let b = s.add(&["wing mirror"]);
+    s.run(&["who", &a, "meri"]);
+    s.run(&["who", &b, "meri", "gegham"]);
+
+    let v = s.json(&["people", "remove", "meri", "--json"]);
+    assert_eq!(v["tasks"], 2);
+    assert_eq!(v["removed"], "Meri");
+    assert_eq!(v["people"][0]["name"], "Gegham");
+
+    let tasks = s.json(&["list", "--json"])["tasks"].clone();
+    assert!(people_of(&tasks[0]).is_empty());
+    assert_eq!(people_of(&tasks[1]), ["Gegham"]);
+
+    // One action, so one undo puts both links back.
+    assert_eq!(s.json(&["undo", "--json"])["events_reverted"], 2);
+    let tasks = s.json(&["list", "--json"])["tasks"].clone();
+    assert_eq!(people_of(&tasks[0]), ["Meri"]);
+    // Link order is the order people were linked in, not a ranking: a restored link
+    // lands at the end, where a fresh one would.
+    assert_eq!(people_of(&tasks[1]), ["Gegham", "Meri"]);
+}
+
+#[test]
+fn the_person_filter_keeps_a_non_matching_parent_as_context() {
+    let s = Sandbox::new();
+    let parent = s.add(&["sell the car"]);
+    let child = s.add(&["order the brake pads", "--under", &parent]);
+    s.add(&["unrelated errand"]);
+    s.run(&["who", &child, "meri"]);
+
+    let texts = order(&s.json(&["list", "--person", "meri", "--json"]));
+    assert_eq!(
+        texts,
+        ["sell the car", "order the brake pads"],
+        "a match is shown under its real parent, and nothing else comes along"
+    );
+
+    let none = s.run(&["list", "--person", "suren"]);
+    assert!(none.status.success(), "an unknown person is an empty list");
+    assert!(String::from_utf8_lossy(&none.stdout).contains("@Suren"));
+}
+
+#[test]
+fn undo_reverts_a_link_an_unlink_and_a_rename() {
+    let s = Sandbox::new();
+    let id = s.add(&["brake pads"]);
+
+    s.run(&["who", &id, "meri", "gegham"]);
+    s.run(&["who", &id, "--remove", "gegham"]);
+    s.run(&["people", "rename", "meri", "mary"]);
+    assert_eq!(
+        people_of(&s.json(&["list", "--json"])["tasks"][0]),
+        ["Mary"]
+    );
+
+    s.run(&["undo"]); // the rename
+    assert_eq!(
+        people_of(&s.json(&["list", "--json"])["tasks"][0]),
+        ["Meri"]
+    );
+    s.run(&["undo"]); // the unlink
+    assert_eq!(
+        people_of(&s.json(&["list", "--json"])["tasks"][0]),
+        ["Meri", "Gegham"]
+    );
+    // The two links were one action, so they go back together.
+    assert_eq!(s.json(&["undo", "--json"])["events_reverted"], 2);
+    assert!(people_of(&s.json(&["list", "--json"])["tasks"][0]).is_empty());
+}
+
+#[test]
+fn compaction_carries_the_links_forward() {
+    let s = Sandbox::new();
+    let a = s.add(&["brake pads"]);
+    let b = s.add(&["wing mirror"]);
+    s.run(&["who", &a, "meri", "McDonald"]);
+    s.run(&["who", &b, "meri"]);
+    s.run(&["people", "rename", "meri", "Meri S"]);
+
+    let before = s.json(&["people", "--json"])["people"].clone();
+    s.json(&["compact", "--json"]);
+
+    assert_eq!(
+        s.json(&["people", "--json"])["people"],
+        before,
+        "the snapshot is the state, links included"
+    );
+    assert_eq!(
+        people_of(&s.json(&["list", "--json"])["tasks"][0]),
+        ["Meri S", "McDonald"],
+        "a snapshot carries the spellings, not just the links"
+    );
+    // And the fresh log — one `compacted` line — still replays them.
+    let events = s.json(&["log", "--json"])["events"].clone();
+    assert_eq!(events.as_array().unwrap().len(), 1);
+    assert_eq!(events[0]["ev"], "compacted");
+}
+
+#[test]
+fn a_batch_can_link_people_and_undo_the_lot() {
+    let s = Sandbox::new();
+    let a = s.add(&["brake pads"]);
+    let b = s.add(&["wing mirror"]);
+    s.run(&["who", &b, "gegham"]);
+
+    let ops = format!(
+        "{{\"op\":\"who\",\"id\":\"{a}\",\"people\":[\"meri\",\"gegham\"]}}\n\
+         {{\"op\":\"who\",\"id\":\"{b}\",\"people\":[\"gegham\"],\"remove\":true}}\n"
+    );
+    let out = s.pd().arg("batch").write_stdin(ops).output().expect("run");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let tasks = s.json(&["list", "--json"])["tasks"].clone();
+    assert_eq!(people_of(&tasks[0]), ["Meri", "Gegham"]);
+    assert!(people_of(&tasks[1]).is_empty());
+
+    assert_eq!(s.json(&["undo", "--json"])["events_reverted"], 3);
+    let tasks = s.json(&["list", "--json"])["tasks"].clone();
+    assert!(people_of(&tasks[0]).is_empty());
+    assert_eq!(people_of(&tasks[1]), ["Gegham"]);
+}
+
+#[test]
+fn people_show_up_in_the_rendered_list_and_in_the_log() {
+    let s = Sandbox::new();
+    let id = s.add(&["brake pads"]);
+    s.run(&["who", &id, "meri"]);
+
+    // Piped output is tab-separated, with the people in their own trailing column.
+    let listed = String::from_utf8_lossy(&s.run(&["list"]).stdout).to_string();
+    assert!(
+        listed.trim_end().ends_with("\tMeri"),
+        "the people column is the last one: {listed:?}"
+    );
+
+    let logged = String::from_utf8_lossy(&s.run(&["log"]).stdout).to_string();
+    assert!(logged.contains("linked"), "{logged}");
+    assert!(logged.contains("@Meri"), "{logged}");
+
+    s.run(&["people", "rename", "meri", "Mary"]);
+    let logged = String::from_utf8_lossy(&s.run(&["log"]).stdout).to_string();
+    assert!(
+        logged.contains("@Meri → @Mary"),
+        "a rename names both sides: {logged}"
+    );
+}
+
+#[test]
+fn a_path_addressed_link_from_an_agent_is_refused_without_expect_seq() {
+    let s = Sandbox::new();
+    s.add(&["brake pads"]);
+    let out = s.run(&["who", "1", "meri"]);
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "stale-path guard covers `who` too"
+    );
+}

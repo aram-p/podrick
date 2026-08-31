@@ -145,8 +145,21 @@ pub struct Row {
     pub state: TaskState,
     pub priority: Option<u8>,
     pub due: Option<String>,
+    pub people: Vec<String>,
     /// Blank line before this row, to separate subtrees.
     pub gap: bool,
+}
+
+/// People as they ride along beside a task: `@meri @gegham`, or nothing at all.
+fn people_suffix(people: &[String]) -> String {
+    if people.is_empty() {
+        return String::new();
+    }
+    people
+        .iter()
+        .map(|p| format!("@{p}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn symbol(state: TaskState) -> &'static str {
@@ -171,7 +184,7 @@ fn rows_at(rows: &[Row], st: Style, now: DateTime<Local>, cols: usize) -> String
             .iter()
             .map(|r| {
                 format!(
-                    "{}\t{}\t{}\t{}{}\t{}",
+                    "{}\t{}\t{}\t{}{}\t{}\t{}",
                     r.path.as_deref().unwrap_or("-"),
                     r.id,
                     match r.state {
@@ -182,6 +195,7 @@ fn rows_at(rows: &[Row], st: Style, now: DateTime<Local>, cols: usize) -> String
                     "  ".repeat(r.depth.saturating_sub(1)),
                     r.text,
                     r.due.as_deref().unwrap_or(""),
+                    r.people.join(","),
                 )
             })
             .collect::<Vec<_>>()
@@ -203,7 +217,15 @@ fn rows_at(rows: &[Row], st: Style, now: DateTime<Local>, cols: usize) -> String
 
     let natural = rows
         .iter()
-        .map(|r| 2 * r.depth.saturating_sub(1) + r.text.chars().count())
+        .map(|r| {
+            let people = people_suffix(&r.people);
+            let tail = if people.is_empty() {
+                0
+            } else {
+                people.chars().count() + 1
+            };
+            2 * r.depth.saturating_sub(1) + r.text.chars().count() + tail
+        })
         .max()
         .unwrap_or(0);
     let width = natural
@@ -220,7 +242,23 @@ fn rows_at(rows: &[Row], st: Style, now: DateTime<Local>, cols: usize) -> String
         // read as a tree. The text column is what is left of `width` after that indent.
         let indent = "  ".repeat(r.depth.saturating_sub(1));
         let indent_w = indent.chars().count();
-        let lines = wrap_text(&r.text, width.saturating_sub(indent_w).max(1));
+        let avail = width.saturating_sub(indent_w).max(1);
+        // The people ride at the end of the title, dimmed, so they read as an annotation
+        // rather than as part of the task. They take their own line only when the last
+        // line of the title has no room left for them.
+        let suffix = people_suffix(&r.people);
+        let mut lines: Vec<(String, String)> = wrap_text(&r.text, avail)
+            .into_iter()
+            .map(|l| (l, String::new()))
+            .collect();
+        if !suffix.is_empty() {
+            let last = lines.last().map(|l| l.0.chars().count()).unwrap_or(0);
+            if last + 1 + suffix.chars().count() <= avail {
+                lines.last_mut().expect("wrap_text never returns nothing").1 = suffix;
+            } else {
+                lines.push((String::new(), suffix));
+            }
+        }
 
         let sym = match r.state {
             TaskState::Open => format!("{indent}{}", symbol(r.state)),
@@ -249,12 +287,21 @@ fn rows_at(rows: &[Row], st: Style, now: DateTime<Local>, cols: usize) -> String
 
         // The date and the id belong to the task, so they sit on its first line; the rest
         // of a wrapped title hangs under the text, clear of the bullet column.
-        for (i, line) in lines.iter().enumerate() {
-            let shown = match r.state {
+        for (i, (line, tail)) in lines.iter().enumerate() {
+            let mut shown = match r.state {
                 TaskState::Open => line.clone(),
                 _ => st.dim(line),
             };
-            let pad = " ".repeat(width.saturating_sub(indent_w + line.chars().count()) + 2);
+            let mut visible = line.chars().count();
+            if !tail.is_empty() {
+                if visible > 0 {
+                    shown.push(' ');
+                    visible += 1;
+                }
+                shown.push_str(&st.dim(tail));
+                visible += tail.chars().count();
+            }
+            let pad = " ".repeat(width.saturating_sub(indent_w + visible) + 2);
             if i == 0 {
                 out.push_str(&format!(
                     "  {}{} {shown}{pad}{due_col}{}\n",
@@ -289,18 +336,27 @@ pub struct Filter {
     /// Exact priority, where the outer `Option` is "was a priority asked for" and the
     /// inner one is the task's own unset-able priority.
     priority: Option<Option<u8>>,
+    /// A normalised person's name the task has to be linked to.
+    person: Option<String>,
 }
 
 impl Filter {
     pub fn text(needle: Option<&str>) -> Filter {
         Filter {
             needle: needle.map(str::to_lowercase),
-            priority: None,
+            ..Default::default()
         }
     }
 
     pub fn with_priority(mut self, p: Option<Option<u8>>) -> Filter {
         self.priority = p;
+        self
+    }
+
+    /// `person` is already normalised — `cli::parse_person` is the only spelling anything
+    /// compares against, and the links were stored through it too.
+    pub fn with_person(mut self, person: Option<String>) -> Filter {
+        self.person = person;
         self
     }
 
@@ -313,7 +369,11 @@ impl Filter {
             None => true,
             Some(want) => task.priority == want,
         };
-        text_ok && pri_ok
+        let person_ok = match &self.person {
+            None => true,
+            Some(who) => task.people.iter().any(|p| p == who),
+        };
+        text_ok && pri_ok && person_ok
     }
 }
 
@@ -391,6 +451,7 @@ pub fn tree_rows(state: &State, show: Show, filter: &Filter, sort: Option<Sort>)
                 state: t.state,
                 priority: t.priority,
                 due: t.due.clone(),
+                people: state.displays_of(&t.people),
                 gap: i == 0 && !rows.is_empty(),
             });
         }
@@ -426,6 +487,7 @@ fn collect(
         state: task.state,
         priority: task.priority,
         due: task.due.clone(),
+        people: state.displays_of(&task.people),
         gap: false,
     }];
     out.extend(children);
@@ -518,6 +580,7 @@ mod tests {
             state: TaskState::Open,
             priority: pri,
             due: None,
+            people: Vec::new(),
             gap: false,
         }
     }
@@ -666,6 +729,24 @@ mod tests {
             "got {lines:?}"
         );
         assert_eq!(lines.concat(), "x".repeat(30), "and nothing is lost");
+    }
+
+    /// The people are an annotation on the title, so they must not push the id out of
+    /// its column or overflow the terminal.
+    #[test]
+    fn people_ride_beside_the_title_without_disturbing_the_id_column() {
+        let rs = [
+            Row {
+                people: vec!["Meri".into(), "Gegham".into()],
+                ..row("rj8", "order the brake pads", 1, None)
+            },
+            row("cxc", "book the service", 1, None),
+        ];
+        let lines = visible_lines(&rows_at(&rs, Style { color: true }, now(), 72));
+        assert!(lines[0].contains("@Meri @Gegham"), "{lines:?}");
+        let col = |l: &String| l.chars().count() - 3;
+        assert_eq!(col(&lines[0]), col(&lines[1]), "ids stay in one column");
+        assert!(lines.iter().all(|l| l.chars().count() <= 72));
     }
 
     /// Sorting now happens during the tree walk, so these go through `tree_rows` rather

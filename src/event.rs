@@ -27,6 +27,13 @@ pub enum Kind {
     Moved,
     Noted,
     Compacted,
+    /// A person was linked to a task.
+    Linked,
+    /// A person was unlinked from a task.
+    Unlinked,
+    /// A person was renamed. File-level: it carries no task id, and every link to the
+    /// old name follows at replay.
+    Renamed,
 }
 
 impl Kind {
@@ -41,6 +48,9 @@ impl Kind {
             Kind::Reprioritized => Some(Kind::Reprioritized),
             Kind::Rescheduled => Some(Kind::Rescheduled),
             Kind::Moved => Some(Kind::Moved),
+            Kind::Linked => Some(Kind::Unlinked),
+            Kind::Unlinked => Some(Kind::Linked),
+            Kind::Renamed => Some(Kind::Renamed),
             // `created` has no compensating event that preserves history, and `noted`
             // / `compacted` are not state changes.
             Kind::Created | Kind::Noted | Kind::Compacted => None,
@@ -72,9 +82,26 @@ pub struct Data {
     /// Full state, carried by `compacted`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<Vec<crate::state::Task>>,
+    /// Folded key to display form, carried by `compacted` beside the snapshot. The tasks
+    /// hold keys; without this the capitalisation anyone chose would not survive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub people: Option<std::collections::BTreeMap<String, String>>,
     /// Set when a parent's completion cascaded to this descendant.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cascaded_from: Option<String>,
+    /// The person a `linked` / `unlinked` event concerns, as the folded key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub person: Option<String>,
+    /// The same person with the caller's capitalisation intact, which is what gets
+    /// rendered. Absent on a log written before display forms existed; replay falls back
+    /// to the key, and the key reads as a name once it is capitalised at the edge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub person_display: Option<String>,
+    /// What that person is to the task. Nothing writes it yet — a link means only
+    /// "this person is involved" — but it is read back and carried through undo and
+    /// compaction, so roles can arrive later without a format break.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

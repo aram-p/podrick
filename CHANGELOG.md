@@ -8,6 +8,78 @@ Changes to the three versioned contracts — JSON payloads, exit codes, and the 
 are always listed under their own heading, because those are the ones that can break a
 caller. A log written by any older `pd` must always still replay.
 
+## 0.2.1
+
+### Added
+
+- **`pd who <task> <person>...`** links people to a task, and `--remove` unlinks them.
+  Repeatable, and idempotent in both directions — linking someone twice appends nothing
+  and is not an error — so an agent can restate a task's people without first reading
+  them. A link is untyped: it means only that the person is involved.
+- **`pd people`** prints the roster, each person with how many of their tasks are open and
+  how many are done, busiest first and ties alphabetical. It is derived from the links
+  rather than maintained, so a person exists exactly as long as some task still names
+  them, and there is no separate list to go stale. Dropped tasks count towards neither
+  total.
+- **`pd people rename <old> <new>`** renames a person everywhere at once, and
+  **`pd people remove <person>`** unlinks them from every task as one undoable action.
+  Renaming onto a name that already exists merges the two.
+- **`pd list --person <who>`** filters the tree to that person's tasks, keeping a
+  non-matching parent as context exactly as the text and priority filters do.
+- **`{"op":"who", …}` in `pd batch`**, with `"remove": true` to unlink — restating who is
+  on forty tasks is the sweep a batch exists for.
+- People render as a dim `@name` suffix beside the task's title, and `pd log` names them
+  on the `linked` / `unlinked` lines and both sides of a rename.
+
+A name is matched on a folded key — trimmed, inner runs of whitespace collapsed,
+lower-cased — so `Meri`, `meri` and `MERI` are one person and any spelling finds them. Two
+spellings of one person would split the counts, and a rename would then only fix half of
+them.
+
+It is **shown** in the capitalisation it was given, which is stored rather than derived:
+title-casing at render time mangles `McDonald`, `de Vries` and `O'Brien`. The first link
+to a person pins the spelling — a later `pd who a7f mcdonald` finds the same person and
+leaves `McDonald` alone — and `pd people rename` is how a spelling is changed, including
+when only the case moves (`pd people rename meri Meri` is a real change, not a no-op). A
+name nobody ever capitalised is capitalised word by word at the edge, so `meri` reads back
+as `Meri`.
+
+### Log format
+
+- Three new event types: **`linked`** and **`unlinked`** (`data.person`, the folded key;
+  `data.person_display`, the spelling as typed; and a reserved `data.role` that nothing
+  writes yet — a typed link can arrive later without a format break, and every reader
+  already tolerates it being present), and **`renamed`**, which carries `data.from` /
+  `data.to` and no task id at all. Replay resolves a rename against the links already in
+  the log, so history is never rewritten to make them follow.
+- A `renamed` event's two names are **display forms**, folded by replay. That is what lets
+  a rename that changes only the capitalisation mean something, and what lets `pd undo`
+  restore the old spelling by the same from/to swap it uses for an `edited`.
+- `compacted` snapshots carry each task's `people` (keys) and a `data.people` map of key
+  to display form, holding only the people some task still names. Both default to empty,
+  so a snapshot written by an older `pd` still replays — its names simply fall back to the
+  capitalisation default.
+- A log written before any of this replays unchanged: every name in it is folded, absent
+  display forms leave the map empty, and each name is capitalised at the edge.
+- All three are undoable: `linked` and `unlinked` invert each other, and `renamed`
+  inverts by swapping its two names.
+
+### JSON payloads
+
+- Every task payload gains **`people`**, an array of display forms (not the folded keys —
+  a caller echoing a name to a human should not have to un-fold it; any spelling is still
+  accepted back as input) — `pd list --json`,
+  `pd add --json`, and every write that returns a task.
+- `pd who --json` returns `task`, `changed` (the people it actually acted on, empty when
+  the call was a no-op) and `action`.
+- `pd people --json` returns `people`, each with `name` (the display form), `open` and
+  `done`. Ties in the ordering break on the folded key, so a capital letter never moves
+  anybody.
+- `pd people rename --json` returns `from` / `to` as display forms, and
+  `pd people remove --json` returns `removed` as one.
+- Piped (non-TTY) list output gains a sixth tab-separated column, the comma-separated
+  display forms. It is appended, so the five before it are unmoved.
+
 ## 0.2.0
 
 ### Changed

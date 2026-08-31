@@ -118,7 +118,46 @@ A task:
 | `priority` | 1–4 \| null | p1 highest, p4 lowest, null = unset (renders as p4) |
 | `due` | string \| null | `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM` |
 | `parent` | id \| null | |
+| `people` | \[string\] | who is involved. Derived from the link events; never typed into the text. |
 | `created_at` / `completed_at` | timestamp | derived from the log |
+
+**People** are links, not text and not a registry. Tasks store keys; the display forms
+live in one map on the state, so a person has exactly one spelling per file and there is
+nowhere for two of them to disagree. `pd who <task> <person>` appends one
+event per person; the roster `pd people` prints is derived by folding those events, so a
+person exists exactly as long as some task still names them and there is no separate list
+to go stale. A link is untyped — it means only *this person is involved* — but the event
+carries a `role` field, absent today, so a typed link can arrive without a format break;
+every reader tolerates it being present.
+
+A name is two things at once. The **key** — trimmed, inner runs of whitespace collapsed to
+one space, lower-cased — is the identity and the only thing ever compared, so `Meri`,
+`meri` and `MERI` are one person and any spelling finds them. Case-insensitivity is not
+politeness: two spellings of one person would split the counts, and `pd people rename`
+would then only fix half of them. The **display form** is the same name with the caller's
+capitalisation intact, and is what gets rendered.
+
+The display form is *stored*, not derived. Title-casing at render time mangles `McDonald`,
+`de Vries` and `O'Brien`, and no rule that rewrites a surname is going to be right often
+enough to be worth being wrong about. So the first link to a person pins the spelling it
+was given — a later `pd who a7f mcdonald` finds the same person and leaves `McDonald`
+alone — and `pd people rename` is how a spelling is changed. A name that nobody ever
+capitalised, or one off a log written before display forms existed, is capitalised word by
+word at the edge: `meri` renders as `Meri`, because a name in lower case reads as a tag
+rather than as a person.
+
+`pd people rename` therefore does something even when the key does not move:
+`pd people rename meri Meri` pins a capitalisation, and is refused as a no-op only once
+that exact spelling is already the stored one.
+
+Renaming is `pd people rename <old> <new>`, which appends a `renamed` event carrying no
+task id. Its two names are display forms, folded by replay — which is what lets a rename
+that changes nothing but the capitalisation say something, and lets `pd undo` restore the
+old spelling by the same from/to swap it uses for an `edited`. Replay resolves every link
+that named the old name, so history is not rewritten to make the links follow, and a log
+written before the rename keeps replaying correctly.
+Renaming onto a name that already exists merges the two. `pd people remove <person>`
+unlinks them everywhere in a single batch, so one `pd undo` puts every link back.
 
 **Nesting: max 4 levels.** Exceeding it is a usage error (exit 2).
 
@@ -160,7 +199,10 @@ One JSON object per line:
 | `rescheduled` | `from`, `to` |
 | `moved` | `from_parent`, `to_parent` |
 | `noted` | — (note with no state change) |
-| `compacted` | `snapshot` |
+| `linked` | `person` (the key), `person_display`, `role` (reserved; always absent today) |
+| `unlinked` | the same three |
+| `renamed` | `from`, `to` — display forms of a person, not a task. Carries no `id`. |
+| `compacted` | `snapshot`, `people` (key → display form) |
 
 Events that belong to one user action share a `batch`, whose value is the seq of the
 action's primary event — the one the user actually named. Closing a parent puts its
@@ -188,10 +230,15 @@ pd pri    <path|id> p1..p4
 pd due    <path|id> <date|none>
 pd mv     <path|id> --under <path|id>
 pd note   <path|id> -m <note>
+pd who    <path|id> <person>...          link people; --remove to unlink
+
+pd people                                the derived list, with open/done counts
+pd people rename <old> <new>
+pd people remove <person>
 
 pd batch                        many changes, one undo — ops as JSONL on stdin
 
-pd list [-a|--all] [-o|--open] [--sort K] [-p N]
+pd list [-a|--all] [-o|--open] [--sort K] [-p N] [--person WHO]
 pd all                          across every registered file
 pd log [<id>]                   the ledger
 pd compact
@@ -205,8 +252,24 @@ at, and "what did I finish today" is asked as often as "what is left". Dropped i
 different claim — *decided against this* — so it waits for `-a/--all`. `-o/--open` is the
 open-only view, and the two flags conflict.
 
-17 verbs. Global flags: `-g`, `-f <path>`, `--here`, `--json`, `--no-color`,
+Unlinking is `pd who --remove` rather than an `unwho` verb. A new verb is spent on a state
+transition that makes its own claim — `done` and `drop` are different things to say about
+a task — and unlinking makes no claim of its own; it is the exact inverse of linking, the
+way `pd due <task> none` is of setting a date. `pd who` is idempotent in both directions:
+linking someone already linked, or unlinking someone who was never there, appends nothing
+and is not an error, because an agent must be able to restate a task's people without
+first reading them.
+
+`pd list --person <who>` filters the tree to the tasks linked to that person, keeping a
+non-matching parent as context exactly as the text and priority filters do — a subtask
+rendered at the root reads as a peer of the roots, which is a lie about the tree. It is
+the same walk, so the three filters cannot drift apart.
+
+19 verbs. Global flags: `-g`, `-f <path>`, `--here`, `--json`, `--no-color`,
 and the hidden `--now <iso>` (see §9).
+
+`pd batch` carries `who` too, since restating who is on forty tasks is exactly the sweep
+it exists for.
 
 `pd batch` exists for the agent 90%: an agent that wants to restate forty tasks should
 leave one entry in the history, not forty, so that one `pd undo` puts them all back. It

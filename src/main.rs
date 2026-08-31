@@ -21,7 +21,7 @@ use chrono::{DateTime, Local};
 use clap::{CommandFactory, Parser};
 use serde_json::{json, Value};
 
-use cli::{Cli, Cmd};
+use cli::{Cli, Cmd, PeopleCmd, PersonName};
 use config::Sort;
 use error::{AppError, Result};
 use event::{Actor, Data, Event, Kind};
@@ -222,11 +222,14 @@ impl Cmd {
             | Cmd::Due { .. }
             | Cmd::Mv { .. }
             | Cmd::Note { .. }
+            | Cmd::Who { .. }
             | Cmd::Batch
             | Cmd::Compact => true,
             // Setting a value writes the registry or config.toml; reading the chain does
             // not. The list form of this predicate had `Config` filed under "read".
             Cmd::Config { value, .. } => value.is_some(),
+            // Listing the people reads; renaming or removing one appends to the ledger.
+            Cmd::People { cmd } => cmd.is_some(),
             Cmd::List { .. }
             | Cmd::All
             | Cmd::Log { .. }
@@ -240,12 +243,13 @@ fn run(cli: &Cli) -> Result<()> {
     let ctx = Ctx::build(cli)?;
 
     match &cli.cmd {
-        None => cmd_list(cli, &ctx, render::Show::default(), None, None, &[]),
+        None => cmd_list(cli, &ctx, render::Show::default(), None, None, None, &[]),
         Some(Cmd::List {
             all,
             open,
             sort,
             priority,
+            person,
             filter,
         }) => cmd_list(
             cli,
@@ -257,6 +261,7 @@ fn run(cli: &Cli) -> Result<()> {
             },
             sort.as_deref(),
             priority.as_deref(),
+            person.as_deref(),
             filter,
         ),
         Some(Cmd::Add {
@@ -285,6 +290,16 @@ fn run(cli: &Cli) -> Result<()> {
         Some(Cmd::Due { target, when }) => cmd_due(cli, &ctx, target, &when.join(" ")),
         Some(Cmd::Mv { target, under, top }) => cmd_mv(cli, &ctx, target, under.as_deref(), *top),
         Some(Cmd::Note { target, message }) => cmd_note(cli, &ctx, target, message),
+        Some(Cmd::Who {
+            target,
+            people,
+            remove,
+        }) => cmd_who(cli, &ctx, target, people, *remove),
+        Some(Cmd::People { cmd }) => match cmd {
+            None => cmd_people(cli, &ctx),
+            Some(PeopleCmd::Rename { old, new }) => cmd_people_rename(cli, &ctx, old, new),
+            Some(PeopleCmd::Remove { person }) => cmd_people_remove(cli, &ctx, person),
+        },
         Some(Cmd::All) => cmd_all(&ctx),
         Some(Cmd::Log { target, limit }) => cmd_log(cli, &ctx, target.as_deref(), *limit),
         Some(Cmd::Batch) => cmd_batch(cli, &ctx),
@@ -521,7 +536,12 @@ fn target_id(ctx: &Ctx, store: &Store, target: &str, is_write: bool) -> Result<S
 // JSON shapes
 // ---------------------------------------------------------------------------
 
-fn task_json(t: &Task, path: Option<&str>) -> Value {
+/// The task as an agent sees it.
+///
+/// `people` are display forms rather than the folded keys the task actually stores: the
+/// key is an implementation detail of matching, and a caller that echoes a name back to
+/// a human should not have to un-fold it. Any spelling is accepted back as input.
+fn task_json(state: &State, t: &Task, path: Option<&str>) -> Value {
     json!({
         "id": t.id,
         "path": path,
@@ -534,6 +554,7 @@ fn task_json(t: &Task, path: Option<&str>) -> Value {
         "priority": t.priority,
         "due": t.due,
         "parent": t.parent,
+        "people": state.displays_of(&t.people),
         "created_at": t.created_at,
         "completed_at": t.completed_at,
     })
@@ -648,6 +669,7 @@ fn cmd_list(
     show: render::Show,
     sort: Option<&str>,
     priority: Option<&str>,
+    person: Option<&str>,
     filter: &[String],
 ) -> Result<()> {
     let open = open(cli, ctx, false)?;
@@ -666,7 +688,12 @@ fn cmd_list(
     // rows afterwards. Filtering after the walk cannot keep a matching task attached to a
     // parent that did not match, and a detached child renders indented under whatever row
     // happens to precede it.
-    let selection = render::Filter::text(filter.as_deref()).with_priority(want);
+    let who = person
+        .map(|p| cli::parse_person(p).map_err(AppError::usage))
+        .transpose()?;
+    let selection = render::Filter::text(filter.as_deref())
+        .with_priority(want)
+        .with_person(who.as_ref().map(|w| w.key.clone()));
     let rows = render::tree_rows(&open.store.state, show, &selection, key);
 
     if ctx.json {
@@ -674,7 +701,7 @@ fn cmd_list(
         let tasks: Vec<Value> = rows
             .iter()
             .filter_map(|r| open.store.state.get(&r.id))
-            .map(|t| task_json(t, paths.path_of(&t.id)))
+            .map(|t| task_json(&open.store.state, t, paths.path_of(&t.id)))
             .collect();
         ctx.emit(envelope(&open, [("tasks", json!(tasks))]));
         return Ok(());
@@ -683,7 +710,7 @@ fn cmd_list(
     if rows.is_empty() {
         // Name whichever criteria were actually given, so an empty result never reads as
         // "you have nothing to do" when it means "nothing matched what you asked for".
-        let msg = match (&filter, want) {
+        let mut msg = match (&filter, want) {
             (Some(f), Some(p)) => format!("nothing matching {f:?} at {}", pri_label(p)),
             (Some(f), None) => format!("nothing matching {f:?}"),
             (None, Some(p)) => format!("nothing at {}", pri_label(p)),
@@ -692,6 +719,15 @@ fn cmd_list(
             (None, None) if show == render::Show::Open => "nothing open".to_string(),
             (None, None) => "nothing here".to_string(),
         };
+        if let Some(p) = &who {
+            // Their own spelling if this file knows one, so an empty result still names
+            // the person the way the rest of the tool would have.
+            let p = open.store.state.display_of(&p.key);
+            msg = match (&filter, want) {
+                (None, None) => format!("nothing for @{p}"),
+                _ => format!("{msg}, for @{p}"),
+            };
+        }
         println!("{}", ctx.style.dim(&msg));
         return Ok(());
     }
@@ -790,7 +826,7 @@ fn cmd_add(
         ctx.emit(envelope_at(
             &open.resolved.path,
             after.state.last_seq,
-            [("task", task_json(task, paths.path_of(&id)))],
+            [("task", task_json(&after.state, task, paths.path_of(&id)))],
         ));
     } else {
         let path = paths.path_of(&id).unwrap_or("-");
@@ -888,7 +924,7 @@ fn cmd_close(
         let t = after
             .state
             .get(&id)
-            .map(|t| task_json(t, None))
+            .map(|t| task_json(&after.state, t, None))
             .unwrap_or(Value::Null);
         ctx.emit(envelope_at(
             &open.resolved.path,
@@ -953,6 +989,11 @@ fn cmd_undo(cli: &Cli, ctx: &Ctx) -> Result<()> {
                     to: e.data.from.clone(),
                     from_parent: e.data.to_parent.clone(),
                     to_parent: e.data.from_parent.clone(),
+                    // A link's inverse concerns the same person, in the same role — it is
+                    // the verb that flips, not the payload.
+                    person: e.data.person.clone(),
+                    person_display: e.data.person_display.clone(),
+                    role: e.data.role.clone(),
                     ..Default::default()
                 })
                 .undoing(e.seq),
@@ -964,7 +1005,10 @@ fn cmd_undo(cli: &Cli, ctx: &Ctx) -> Result<()> {
 
     let after = store::load(&open.resolved.path)?;
     if ctx.json {
-        let t = after.state.get(&orig.id).map(|t| task_json(t, None));
+        let t = after
+            .state
+            .get(&orig.id)
+            .map(|t| task_json(&after.state, t, None));
         ctx.emit(envelope_at(
             &open.resolved.path,
             after.state.last_seq,
@@ -1039,7 +1083,7 @@ fn mutate(
         let t = after
             .state
             .get(&id)
-            .map(|t| task_json(t, paths.path_of(&id)))
+            .map(|t| task_json(&after.state, t, paths.path_of(&id)))
             .unwrap_or(Value::Null);
         ctx.emit(envelope_at(
             &open.resolved.path,
@@ -1160,7 +1204,7 @@ fn cmd_mv(cli: &Cli, ctx: &Ctx, target: &str, under: Option<&str>, top: bool) ->
         let t = after
             .state
             .get(&id)
-            .map(|t| task_json(t, paths.path_of(&id)))
+            .map(|t| task_json(&after.state, t, paths.path_of(&id)))
             .unwrap_or(Value::Null);
         ctx.emit(envelope_at(
             &open.resolved.path,
@@ -1202,7 +1246,7 @@ fn cmd_note(cli: &Cli, ctx: &Ctx, target: &str, message: &str) -> Result<()> {
         let t = after
             .state
             .get(&id)
-            .map(|t| task_json(t, None))
+            .map(|t| task_json(&after.state, t, None))
             .unwrap_or(Value::Null);
         ctx.emit(envelope_at(
             &open.resolved.path,
@@ -1211,6 +1255,272 @@ fn cmd_note(cli: &Cli, ctx: &Ctx, target: &str, message: &str) -> Result<()> {
         ));
     } else {
         println!("noted  {}", task.text);
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// People
+// ---------------------------------------------------------------------------
+
+/// Fold the names a caller gave us into the one spelling anything compares against, and
+/// drop the repeats in the request itself — `pd who a7f meri Meri` names one person.
+fn wanted_people(raw: &[String]) -> Result<Vec<PersonName>> {
+    let mut out: Vec<PersonName> = Vec::new();
+    for p in raw {
+        let name = cli::parse_person(p).map_err(AppError::usage)?;
+        if !out.iter().any(|k| k.key == name.key) {
+            out.push(name);
+        }
+    }
+    Ok(out)
+}
+
+fn cmd_who(cli: &Cli, ctx: &Ctx, target: &str, people: &[String], remove: bool) -> Result<()> {
+    let open = open(cli, ctx, false)?;
+    let id = target_id(ctx, &open.store, target, true)?;
+    let task = open
+        .store
+        .state
+        .get(&id)
+        .expect("resolved id exists")
+        .clone();
+
+    // Idempotent in both directions, so nothing here is an error: linking someone who is
+    // already on the task, or unlinking someone who was never on it, is a no-op and is
+    // left out of the ledger rather than refused. A command that an agent may safely run
+    // twice is worth more than one that complains precisely.
+    let changing: Vec<PersonName> = wanted_people(people)?
+        .into_iter()
+        .filter(|n| task.people.contains(&n.key) == remove)
+        .collect();
+
+    let kind = if remove { Kind::Unlinked } else { Kind::Linked };
+    let first_seq = open.store.state.last_seq + 1;
+    let events: Vec<Event> = changing
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            // One event per person, and one batch for the lot: `pd who a7f meri gegham`
+            // is one thing the user did, so one `pd undo` takes it back.
+            Event::new(first_seq + i as u64, ctx.ts(), ctx.actor, kind, &id)
+                .in_batch(first_seq)
+                .with_data(Data {
+                    person: Some(name.key.clone()),
+                    person_display: Some(name.display.clone()),
+                    ..Default::default()
+                })
+        })
+        .collect();
+
+    store::append(&open.resolved.path, &events)?;
+    let after = store::load(&open.resolved.path)?;
+
+    // Reported in the spelling the file settled on, which is the one the caller typed
+    // only if theirs was the first — `pd who a7f mcdonald` after `McDonald` says
+    // `@McDonald`, because that is what everything else will show from now on.
+    let verb = if remove { "unlinked" } else { "linked" };
+    let shown: Vec<String> = changing
+        .iter()
+        .map(|n| after.state.display_of(&n.key))
+        .collect();
+    if changing.is_empty() {
+        ctx.note(&format!("nothing to do; {:?} is unchanged", task.text));
+    }
+
+    if ctx.json {
+        let paths = after.state.paths();
+        let t = after
+            .state
+            .get(&id)
+            .map(|t| task_json(&after.state, t, paths.path_of(&id)))
+            .unwrap_or(Value::Null);
+        ctx.emit(envelope_at(
+            &open.resolved.path,
+            after.state.last_seq,
+            [
+                ("task", t),
+                ("changed", json!(shown)),
+                ("action", json!(verb)),
+            ],
+        ));
+    } else if !changing.is_empty() {
+        println!("{verb}  {}  {}", show_people(&shown), task.text);
+    }
+    Ok(())
+}
+
+fn show_people(people: &[String]) -> String {
+    people
+        .iter()
+        .map(|p| format!("@{p}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn cmd_people(cli: &Cli, ctx: &Ctx) -> Result<()> {
+    let open = open(cli, ctx, false)?;
+    let people = open.store.state.people();
+
+    if ctx.json {
+        ctx.emit(envelope(&open, [("people", json!(people))]));
+        return Ok(());
+    }
+    if people.is_empty() {
+        println!("{}", ctx.style.dim("nobody linked to anything yet"));
+        return Ok(());
+    }
+
+    let w = people
+        .iter()
+        .map(|p| p.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    for p in &people {
+        let counts = if p.done > 0 {
+            format!("{} open · {} done", p.open, p.done)
+        } else {
+            format!("{} open", p.open)
+        };
+        println!("  {:<w$}  {}", p.name, ctx.style.dim(&counts), w = w);
+    }
+    Ok(())
+}
+
+fn cmd_people_rename(cli: &Cli, ctx: &Ctx, old: &str, new: &str) -> Result<()> {
+    let open = open(cli, ctx, false)?;
+    let old = cli::parse_person(old).map_err(AppError::usage)?;
+    let new = cli::parse_person(new).map_err(AppError::usage)?;
+    if !open.store.state.knows_person(&old.key) {
+        return Err(
+            AppError::not_found(format!("nobody called {:?}", old.display))
+                .with_hint("run `pd people` to see who this file knows about"),
+        );
+    }
+    // Compared against what is *stored*, not what is rendered: `pd people rename meri
+    // Meri` has to be a real change, and it is invisible to a comparison made after the
+    // capitalisation default has already turned `meri` into `Meri`.
+    if open.store.state.stored_display(&old.key) == Some(new.display.as_str()) {
+        return Err(AppError::usage(format!(
+            "{:?} is already the name",
+            new.display
+        )));
+    }
+    let affected = open.store.state.tasks_of(&old.key).len();
+    // The old spelling as it stands, so `pd undo` puts back exactly that.
+    let from = open
+        .store
+        .state
+        .stored_display(&old.key)
+        .unwrap_or(old.key.as_str())
+        .to_string();
+
+    // One event for the whole rename, carrying no task id. Replay applies it to every
+    // link that named the old name, so the links already in the log keep resolving —
+    // history is not rewritten to make them.
+    let ev = Event::new(
+        open.store.state.last_seq + 1,
+        ctx.ts(),
+        ctx.actor,
+        Kind::Renamed,
+        "",
+    )
+    .with_data(Data {
+        // Display forms on both sides: folding them is replay's job, and keeping the
+        // spelling here is what lets `undo` restore it by the same swap it uses
+        // everywhere else.
+        from: Some(json!(from)),
+        to: Some(json!(new.display)),
+        ..Default::default()
+    });
+    store::append(&open.resolved.path, &[ev])?;
+
+    let after = store::load(&open.resolved.path)?;
+    if ctx.json {
+        ctx.emit(envelope_at(
+            &open.resolved.path,
+            after.state.last_seq,
+            [
+                ("from", json!(open.store.state.display_of(&old.key))),
+                ("to", json!(after.state.display_of(&new.key))),
+                ("tasks", json!(affected)),
+                ("people", json!(after.state.people())),
+            ],
+        ));
+    } else {
+        println!(
+            "renamed  @{} → @{}",
+            open.store.state.display_of(&old.key),
+            after.state.display_of(&new.key)
+        );
+        println!(
+            "{}",
+            ctx.style.dim(&format!("         on {affected} task(s)"))
+        );
+    }
+    Ok(())
+}
+
+fn cmd_people_remove(cli: &Cli, ctx: &Ctx, person: &str) -> Result<()> {
+    let open = open(cli, ctx, false)?;
+    let name = cli::parse_person(person).map_err(AppError::usage)?;
+    let shown = open.store.state.display_of(&name.key);
+    let targets: Vec<String> = open
+        .store
+        .state
+        .tasks_of(&name.key)
+        .into_iter()
+        .map(|t| t.id.clone())
+        .collect();
+    if targets.is_empty() {
+        return Err(
+            AppError::not_found(format!("nobody called {:?}", name.display))
+                .with_hint("run `pd people` to see who this file knows about"),
+        );
+    }
+
+    // Removing a person is unlinking them everywhere, in one batch, so `pd undo` puts
+    // every link back rather than one of them.
+    let first_seq = open.store.state.last_seq + 1;
+    let events: Vec<Event> = targets
+        .iter()
+        .enumerate()
+        .map(|(i, id)| {
+            Event::new(
+                first_seq + i as u64,
+                ctx.ts(),
+                ctx.actor,
+                Kind::Unlinked,
+                id,
+            )
+            .in_batch(first_seq)
+            .with_data(Data {
+                person: Some(name.key.clone()),
+                person_display: Some(name.display.clone()),
+                ..Default::default()
+            })
+        })
+        .collect();
+    store::append(&open.resolved.path, &events)?;
+
+    let after = store::load(&open.resolved.path)?;
+    if ctx.json {
+        ctx.emit(envelope_at(
+            &open.resolved.path,
+            after.state.last_seq,
+            [
+                ("removed", json!(shown)),
+                ("tasks", json!(targets.len())),
+                ("people", json!(after.state.people())),
+            ],
+        ));
+    } else {
+        println!("removed  @{shown}");
+        println!(
+            "{}",
+            ctx.style
+                .dim(&format!("         from {} task(s)", targets.len()))
+        );
     }
     Ok(())
 }
@@ -1269,6 +1579,13 @@ enum Op {
         id: String,
         message: String,
     },
+    Who {
+        id: String,
+        people: Vec<String>,
+        /// Unlink them instead, mirroring `pd who --remove`.
+        #[serde(default)]
+        remove: bool,
+    },
 }
 
 impl Op {
@@ -1281,7 +1598,8 @@ impl Op {
             | Op::Done { id, .. }
             | Op::Reopen { id, .. }
             | Op::Drop { id, .. }
-            | Op::Note { id, .. } => id,
+            | Op::Note { id, .. }
+            | Op::Who { id, .. } => id,
         }
     }
 }
@@ -1419,6 +1737,30 @@ fn cmd_batch(cli: &Cli, ctx: &Ctx) -> Result<()> {
             Op::Note { message, .. } => {
                 produced.push(ev(Kind::Noted).with_note(Some(message.clone())));
             }
+            Op::Who { people, remove, .. } => {
+                let changing: Vec<PersonName> = wanted_people(people)
+                    .map_err(|e| fail(e.msg))?
+                    .into_iter()
+                    .filter(|n| task.people.contains(&n.key) == *remove)
+                    .collect();
+                if changing.is_empty() {
+                    continue; // already so; a batch tolerates what it cannot improve on
+                }
+                let kind = if *remove {
+                    Kind::Unlinked
+                } else {
+                    Kind::Linked
+                };
+                for (i, name) in changing.iter().enumerate() {
+                    produced.push(
+                        Event::new(seq + i as u64, ctx.ts(), ctx.actor, kind, id).with_data(Data {
+                            person: Some(name.key.clone()),
+                            person_display: Some(name.display.clone()),
+                            ..Default::default()
+                        }),
+                    );
+                }
+            }
             Op::Done { note, .. } | Op::Reopen { note, .. } | Op::Drop { note, .. } => {
                 let kind = match op {
                     Op::Done { .. } => Kind::Completed,
@@ -1538,6 +1880,56 @@ fn subtree_height(state: &State, id: &str) -> usize {
         + 1
 }
 
+/// What a log line is *about*. Usually the task's text, but a person event says who, and
+/// a rename has no task at all — its subject is the pair of names.
+fn subject(state: &State, e: &Event) -> String {
+    let of_task = || {
+        state
+            .get(&e.id)
+            .map(|t| t.text.clone())
+            .unwrap_or_else(|| e.id.clone())
+    };
+    match e.ev {
+        Kind::Renamed => {
+            let name = |v: &Option<Value>| {
+                v.as_ref()
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?")
+                    .to_string()
+            };
+            format!(
+                "@{} → @{}",
+                state::shown(&name(&e.data.from)),
+                state::shown(&name(&e.data.to))
+            )
+        }
+        Kind::Linked | Kind::Unlinked => {
+            // The role is always absent today, but a log written by a later `pd` that
+            // sets one still has to read back as a sentence rather than lose half of it.
+            let role = e
+                .data
+                .role
+                .as_deref()
+                .map(|r| format!(" ({r})"))
+                .unwrap_or_default();
+            // The spelling as it was at the time, not as it is now: a log line is a
+            // record of what happened, and a later rename did not happen here.
+            format!(
+                "@{}{role}  {}",
+                state::shown(
+                    e.data
+                        .person_display
+                        .as_deref()
+                        .or(e.data.person.as_deref())
+                        .unwrap_or("?")
+                ),
+                of_task()
+            )
+        }
+        _ => of_task(),
+    }
+}
+
 fn cmd_log(cli: &Cli, ctx: &Ctx, target: Option<&str>, limit: usize) -> Result<()> {
     let open = open(cli, ctx, false)?;
     let events = store::read_events(&open.resolved.path)?;
@@ -1563,12 +1955,7 @@ fn cmd_log(cli: &Cli, ctx: &Ctx, target: Option<&str>, limit: usize) -> Result<(
     }
 
     for e in shown {
-        let text = open
-            .store
-            .state
-            .get(&e.id)
-            .map(|t| t.text.clone())
-            .unwrap_or_else(|| e.id.clone());
+        let text = subject(&open.store.state, e);
         let when = DateTime::parse_from_rfc3339(&e.ts)
             .map(|d| dates::humanize(&d.format("%Y-%m-%dT%H:%M").to_string(), ctx.now))
             .unwrap_or_else(|_| e.ts.clone());
@@ -1779,7 +2166,7 @@ fn cmd_all(ctx: &Ctx) -> Result<()> {
             let tasks: Vec<Value> = rows
                 .iter()
                 .filter_map(|r| st.state.get(&r.id))
-                .map(|t| task_json(t, paths.path_of(&t.id)))
+                .map(|t| task_json(&st.state, t, paths.path_of(&t.id)))
                 .collect();
             files.push(json!({ "file": e.path, "seq": st.state.last_seq, "tasks": tasks }));
         } else {
@@ -1831,8 +2218,8 @@ mod tests {
             .map(|c| c["name"].as_str().unwrap())
             .collect();
         for expected in [
-            "add", "done", "reopen", "drop", "undo", "edit", "pri", "due", "mv", "note", "list",
-            "all", "log", "compact", "config", "files",
+            "add", "done", "reopen", "drop", "undo", "edit", "pri", "due", "mv", "note", "who",
+            "people", "list", "all", "log", "compact", "config", "files",
         ] {
             assert!(names.contains(&expected), "schema is missing {expected}");
         }

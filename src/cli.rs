@@ -148,6 +148,46 @@ pub enum Cmd {
         top: bool,
     },
 
+    /// Link people to a task, or unlink them with --remove
+    ///
+    /// Repeatable and idempotent in both directions: linking someone twice is not an
+    /// error and does not duplicate them, and unlinking someone who is not there does
+    /// nothing. A link means only that the person is involved — there are no roles.
+    ///
+    /// Names are matched loosely: trimmed, inner runs of spaces collapsed, and
+    /// lower-cased, so `Meri` and `  meri ` are the same person. `pd people` derives the
+    /// full list from the links themselves.
+    ///
+    /// --json returns the task, including its `people`.
+    #[command(after_help = "EXAMPLE\n  \
+        pd who a7f meri gegham\n  \
+        pd who a7f --remove gegham")]
+    Who {
+        target: String,
+        /// One or more people
+        #[arg(required = true, num_args = 1..)]
+        people: Vec<String>,
+        /// Unlink them instead of linking them
+        #[arg(short = 'r', long)]
+        remove: bool,
+    },
+
+    /// The people this file knows about, with how much is open on each
+    ///
+    /// Derived from the links, never maintained: a person exists exactly as long as some
+    /// task still names them. Sorted by open count, descending, then by name. Dropped
+    /// tasks count towards neither total.
+    ///
+    /// --json returns `people`, each with `name`, `open` and `done`.
+    #[command(after_help = "EXAMPLE\n  \
+        pd people\n  \
+        pd people rename meri \"meri sargsyan\"\n  \
+        pd people remove gegham")]
+    People {
+        #[command(subcommand)]
+        cmd: Option<PeopleCmd>,
+    },
+
     /// Attach a note to a task without changing its state
     #[command(after_help = "EXAMPLE\n  pd note a7f -m \"blocked on the API review\"")]
     Note {
@@ -171,6 +211,11 @@ pub enum Cmd {
         /// Show only this priority
         #[arg(short = 'p', long, value_name = "P1-P4")]
         priority: Option<String>,
+        /// Show only tasks linked to this person, keeping their parents as context
+        ///
+        /// Matched case-insensitively, so any spelling of the name finds them.
+        #[arg(long, value_name = "PERSON")]
+        person: Option<String>,
         /// Substring filter
         #[arg(num_args = 0..)]
         filter: Vec<String>,
@@ -249,6 +294,53 @@ pub enum Cmd {
     Completions { shell: Shell },
 }
 
+#[derive(Subcommand, Debug)]
+pub enum PeopleCmd {
+    /// Rename a person everywhere at once
+    ///
+    /// Appended as a ledger event rather than applied by rewriting history, so every
+    /// link that named the old name resolves to the new one on replay — including the
+    /// links in a log written before the rename. Renaming onto a name that already
+    /// exists merges the two.
+    #[command(after_help = "EXAMPLE\n  pd people rename meri \"meri sargsyan\"")]
+    Rename { old: String, new: String },
+
+    /// Unlink a person from every task
+    ///
+    /// One undoable action, so `pd undo` puts every link back.
+    #[command(after_help = "EXAMPLE\n  pd people remove gegham")]
+    Remove { person: String },
+}
+
+/// A person's name as the two things it has to be at once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersonName {
+    /// What everything is compared against: trimmed, inner runs of whitespace collapsed
+    /// to one space, lower-cased.
+    pub key: String,
+    /// The same name with the caller's capitalisation intact. `McDonald` and `de Vries`
+    /// are not spelling mistakes, and no rule that rewrites them is going to be right
+    /// often enough to be worth being wrong about.
+    pub display: String,
+}
+
+/// Split a name into the form that is matched and the form that is shown.
+///
+/// Matching is case-insensitive because nobody types a colleague's name the same way
+/// twice, and it folds to one key rather than keeping every spelling because two
+/// spellings of one person is exactly the failure a derived list cannot recover from —
+/// the counts would split, and `pd people rename` would only fix half of them.
+pub fn parse_person(s: &str) -> Result<PersonName, String> {
+    let display = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if display.is_empty() {
+        return Err("a person needs a name".to_string());
+    }
+    Ok(PersonName {
+        key: display.to_lowercase(),
+        display,
+    })
+}
+
 /// Accepts `p1`..`p4`, `1`..`4`, and `none`.
 pub fn parse_priority(s: &str) -> Result<Option<u8>, String> {
     let s = s.trim().to_lowercase();
@@ -272,6 +364,26 @@ mod tests {
     #[test]
     fn the_command_surface_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn people_names_fold_to_one_key_and_keep_their_spelling() {
+        let p = parse_person("  Meri ").unwrap();
+        assert_eq!((p.key.as_str(), p.display.as_str()), ("meri", "Meri"));
+
+        let p = parse_person("MERI\tSARGSYAN").unwrap();
+        assert_eq!(p.key, "meri sargsyan");
+        assert_eq!(
+            p.display, "MERI SARGSYAN",
+            "the caller's caps are kept verbatim"
+        );
+
+        assert_eq!(
+            parse_person("meri   sargsyan").unwrap().display,
+            "meri sargsyan"
+        );
+        assert_eq!(parse_person("McDonald").unwrap().key, "mcdonald");
+        assert!(parse_person("   ").is_err());
     }
 
     #[test]

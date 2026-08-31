@@ -4,7 +4,7 @@ A terminal task tracker with a perfect memory, built for agents first.
 
 ```
   ▏ ○ fix the flaky test         in 2d      qdb
-      ○ pin the seed                        zu7
+      ○ pin the seed @Meri                  zu7
       ○ check CI on the runner              nn3
 
   ▏ ○ write the release notes    in 18h     ffu
@@ -71,6 +71,8 @@ pd                                     # the list
 pd done 2 -m "pinned the seed"         # notes are optional, and permanent
 pd undo                                # revert the last action, whatever it was
 pd flaky                               # substring search
+pd who 2 meri                          # who needs this
+pd people                              # and what each of them is waiting on
 ```
 
 Tasks live in a `.podrick` file at the root of whatever git repo you are in, so each
@@ -85,12 +87,25 @@ The list shows open tasks as a tree and what you finished as a flat block undern
 | `pd done` / `reopen` / `drop` | `-m <note>` on any of them |
 | `pd undo` | reverts the last action, cascades included |
 | `pd edit` / `pri` / `due` / `mv` / `note` | change one field |
-| `pd list` | `-o/--open`, `-a/--all`, `--sort priority\|due\|created\|alpha`, `-p` |
+| `pd who <task> <person>...` | `--remove` to unlink; idempotent either way |
+| `pd people` | the derived list, with open/done counts |
+| `pd people rename` / `remove` | renames follow every link, and fix a capitalisation |
+| `pd list` | `-o/--open`, `-a/--all`, `--sort priority\|due\|created\|alpha`, `-p`, `--person` |
 | `pd batch` | many changes, one undo — ops as JSONL on stdin |
 | `pd all` / `pd files` | across every known list |
 | `pd log [id]` | the ledger |
 | `pd compact` | archive the log, keep the state |
 | `pd config sort due [--project]` | global, or this project only |
+
+People are links, not text you type into a task. `pd who a7f meri` says Meri is involved;
+`pd list --person meri` is everything she is waiting on, and `pd people` is the whole
+roster with what is open on each. There is no list to maintain — a person exists exactly
+as long as some task still names them — and there is no `@name` syntax to get wrong.
+Any spelling of a name finds the same person — `Meri`, `meri` and `MERI` are one — but the
+one you first typed is the one you see. `McDonald` stays `McDonald`, `de Vries` stays
+`de Vries`, and a name nobody capitalised is shown capitalised anyway, so `pd who a7f meri`
+reads back as `@Meri`. `pd people rename meri "Meri Sargsyan"` carries every link with it,
+and is also how a capitalisation gets fixed.
 
 Dates are ordinary English: `fri`, `tomorrow 9am`, `next tue`, `in 3 days`, `dec 25`,
 `2026-12-25 15:00`. A weekday means *today* if today is that weekday, and a bare time
@@ -127,6 +142,7 @@ One file, `.podrick`, holding one JSON event per line:
 
 ```json
 {"v":1,"seq":11,"ts":"2026-08-12T14:03:11+04:00","actor":"cli","ev":"completed","id":"a7f","note":"finally green","batch":11}
+{"v":1,"seq":12,"ts":"2026-08-12T14:04:02+04:00","actor":"cli","ev":"linked","id":"a7f","batch":12,"data":{"person":"meri","person_display":"Meri"}}
 ```
 
 State is replayed from the log on every command, which takes well under a millisecond for
